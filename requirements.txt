@@ -1,7 +1,8 @@
-streamlit==1.28.1
+streamlit
 mistralai
-PyMuPDF==1.23.8
-openpyxl==3.11.0
-python-dotenv==1.0.0
+PyMuPDF
+openpyxl
+python-dotenv
+
 
 
