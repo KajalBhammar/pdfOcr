@@ -2,7 +2,3 @@ streamlit
 mistralai
 PyMuPDF
 openpyxl
-python-dotenv
-
-
-
