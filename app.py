@@ -224,6 +224,10 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
                     if extracted_member and len(extracted_member.strip()) > 0:
                         mem_id = extracted_member
             
+            # Check if this is a DROP SHEET page based on extracted content
+            if "DROP" in facility_info.upper() or "DROP" in patient_name.upper() or "DROP SHEET" in response_text.upper():
+                continue
+            
             # Add all rows regardless of whether primary data is found
             # Only skip if completely empty
             has_any_data = (patient_name and len(patient_name.strip()) > 0) or \
