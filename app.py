@@ -2,21 +2,15 @@ import streamlit as st
 import base64
 import fitz  # PyMuPDF
 from openpyxl import Workbook
+from openpyxl.styles import PatternFill
 import os
 from datetime import datetime
 from mistralai import Mistral
 import tempfile
-from dotenv import load_dotenv
+from datetime import datetime as dt
 
-# Load environment variables
-load_dotenv()
-
-# Initialize Mistral client
-api_key = os.getenv("MISTRAL_API_KEY")
-if not api_key:
-    st.error("❌ MISTRAL_API_KEY not found in .env file")
-    st.stop()
-
+# Initialize Mistral client with Streamlit secrets
+api_key = st.secrets["mistral_api_key"]
 client = Mistral(api_key=api_key)
 
 # Facility mapping list
@@ -72,6 +66,34 @@ def match_facility(extracted_facility):
     
     return "Not found"
 
+def format_date_to_ddmmyyyy(date_str, default_date="01/01/2000", is_required=False):
+    """Convert date string to dd/mm/yyyy format"""
+    if not date_str or date_str.lower() == "not found":
+        # If date is required (like for appointment dates), use default; otherwise return empty
+        return default_date if is_required else ""
+    
+    date_str = date_str.strip()
+    
+    # Common date formats to try
+    date_formats = [
+        "%m/%d/%Y", "%m/%d/%y", "%m-%d-%Y", "%m-%d-%y",
+        "%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y",
+        "%Y/%m/%d", "%Y-%m-%d",
+        "%B %d, %Y", "%b %d, %Y",
+        "%d %B %Y", "%d %b %Y",
+        "%m/%d", "%d/%m"
+    ]
+    
+    for fmt in date_formats:
+        try:
+            parsed_date = dt.strptime(date_str, fmt)
+            return parsed_date.strftime("%d/%m/%Y")
+        except ValueError:
+            continue
+    
+    # If no format matches, return default if required, otherwise return empty
+    return default_date if is_required else ""
+
 def extract_from_pdf(pdf_file, progress_bar, status_text):
     """Extract data from PDF and return Excel file"""
     # Save PDF to temp file
@@ -79,6 +101,7 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
         tmp.write(pdf_file.read())
         pdf_path = tmp.name
     
+    doc = None
     try:
         # Convert PDF to images
         doc = fitz.open(pdf_path)
@@ -91,12 +114,34 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
         ws.title = "Extracted Data"
         
         # Add headers
-        ws['A1'] = "Appt Date"
-        ws['B1'] = "Name of Patient"
-        ws['C1'] = "Facility Information_name_pdf"
-        ws['D1'] = "Facility_name_final"
+        ws['A1'] = "Name of the Phleb"
+        ws['B1'] = "Date"
+        ws['C1'] = "No of Patient"
+        ws['D1'] = "Patient ID"
+        ws['E1'] = "patient bod"
+        ws['F1'] = "Name of Patient"
+        ws['G1'] = "Patient Birthdate"
+        ws['H1'] = "Facility  Information"
+        ws['I1'] = "Patients ICD Code"
+        ws['J1'] = "From"
+        ws['K1'] = "To"
+        ws['L1'] = "Miles"
+        ws['M1'] = "To"
+        ws['N1'] = "Miles"
+        ws['O1'] = "To"
+        ws['P1'] = "Miles"
+        ws['Q1'] = "To"
+        ws['R1'] = "Miles"
+        ws['S1'] = "To"
+        ws['T1'] = "Miles"
+        ws['U1'] = "Total Miles"
+        ws['V1'] = "Insurance Company"
+        ws['W1'] = "Mem ID"
+        ws['X1'] = "Group Mem ID"
         
         row = 2
+        prev_date = ""
+        prev_facility = ""
         
         # Process each page
         for page_num, pixmap in enumerate(images, 1):
@@ -114,7 +159,7 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Extract ONLY PRINTED/TYPED text from this document. Skip all handwritten text completely.\n\nExtract the following information:\n1. Appointment Date (Appt Date)\n2. Name of Patient\n3. Facility Information (Include BOTH facility name AND address together)\n\nIMPORTANT FOR PATIENT NAME: Copy the name EXACTLY as it appears in the PDF. Do NOT rearrange, reformat, or change the order. If it says 'DAVID FREITAS W', write 'DAVID FREITAS W' - do NOT change it to 'FREITAS, DAVID'. Extract it as-is without any modifications.\n\nReturn the data in this format:\nAppt Date: [date]\nName of Patient: [name - COPY EXACTLY AS APPEARS IN PDF, DO NOT CHANGE FORMAT]\nFacility Information: [facility name and address]\n\nIf any field is not found or is handwritten, write 'Not found'.\nFor Facility Information, extract and combine the facility name with its complete address on the same line.\nReturn all found printed text, do NOT skip pages."},
+                        {"type": "text", "text": "Extract ONLY PRINTED/TYPED text from this document. Skip all handwritten text completely.\n\nExtract the following information:\n1. Appointment Date (Appt Date)\n2. Name of Patient\n3. Patient Birthdate (DOB)\n4. Facility Information (Include BOTH facility name AND address together)\n5. Primary Insurance Company\n6. Sub/Member No. (Member ID)\n\nIMPORTANT FOR PATIENT NAME: Copy the name EXACTLY as it appears in the PDF. Do NOT rearrange, reformat, or change the order. If it says 'DAVID FREITAS W', write 'DAVID FREITAS W' - do NOT change it to 'FREITAS, DAVID'. Extract it as-is without any modifications.\n\nReturn the data in this format:\nAppt Date: [date]\nName of Patient: [name - COPY EXACTLY AS APPEARS IN PDF, DO NOT CHANGE FORMAT]\nPatient Birthdate: [DOB in any date format found]\nFacility Information: [facility name and address]\nPrimary: [Insurance Company name]\nSub/Member No.: [Member ID]\n\nIf any field is not found or is handwritten, write 'Not found'.\nFor Facility Information, extract and combine the facility name with its complete address on the same line.\nReturn all found printed text, do NOT skip pages."},
                         {
                             "type": "image_url",
                             "image_url": f"data:image/png;base64,{image_base64}"
@@ -138,31 +183,110 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
             else:
                 response_text = str(response.outputs[0])
             
+            # Skip this page if it contains "DROP SHEET"
+            if "DROP SHEET" in response_text.upper():
+                # Skip this page completely, don't add anything
+                continue
+            
             # Extract fields from response
             lines = response_text.split('\n')
             appt_date = ""
             patient_name = ""
+            patient_birthdate = ""
             facility_info = ""
+            insurance_company = ""
+            mem_id = ""
             
             for line in lines:
                 if "Appt Date:" in line:
                     appt_date = line.split("Appt Date:")[-1].strip().replace("*", "")
                 elif "Name of Patient:" in line:
                     patient_name = line.split("Name of Patient:")[-1].strip().replace("*", "")
+                elif "Patient Birthdate:" in line:
+                    patient_birthdate = line.split("Patient Birthdate:")[-1].strip().replace("*", "")
                 elif "Facility Information:" in line:
                     facility_info = line.split("Facility Information:")[-1].strip().replace("*", "")
+                elif "Primary:" in line:
+                    extracted_primary = line.split("Primary:")[-1].strip().replace("*", "")
+                    # Only set insurance_company if Primary has actual content (not "Not found" or empty)
+                    if extracted_primary and extracted_primary.lower() != "not found" and len(extracted_primary.strip()) > 0:
+                        insurance_company = extracted_primary
+                elif "Sub/Member No.:" in line:
+                    extracted_member = line.split("Sub/Member No.:")[-1].strip().replace("*", "")
+                    # Only set mem_id if Sub/Member No. has actual content
+                    if extracted_member and extracted_member.lower() != "not found" and len(extracted_member.strip()) > 0:
+                        mem_id = extracted_member
             
-            # Only add to Excel if at least one field is found
-            has_patient_info = patient_name and patient_name.lower() != "not found"
-            has_facility_info = facility_info and facility_info.lower() != "not found"
+            # Add all rows regardless of whether primary data is found
+            # Only skip if completely empty
+            has_any_data = (patient_name and patient_name.lower() != "not found") or \
+                          (facility_info and facility_info.lower() != "not found") or \
+                          (appt_date and appt_date.lower() != "not found")
             
-            if has_patient_info or has_facility_info:
+            if has_any_data:
                 facility_final = match_facility(facility_info)
                 
-                ws[f'A{row}'] = appt_date
-                ws[f'B{row}'] = patient_name
-                ws[f'C{row}'] = facility_info
-                ws[f'D{row}'] = facility_final
+                # Format dates to dd/mm/yyyy
+                # Appointment date is optional - leave blank if missing
+                formatted_appt_date = format_date_to_ddmmyyyy(appt_date, default_date="", is_required=False)
+                # Birthdate is optional but should be blank if missing, not "Not found"
+                formatted_birthdate = format_date_to_ddmmyyyy(patient_birthdate, default_date="", is_required=False)
+                
+                # Convert "Not found" to empty strings for all fields
+                patient_name = "" if patient_name.lower() == "not found" else patient_name
+                facility_final = "" if facility_final.lower() == "not found" else facility_final
+                insurance_company = "" if insurance_company.lower() == "not found" else insurance_company
+                mem_id = "" if mem_id.lower() == "not found" else mem_id
+                
+                ws[f'A{row}'] = ""  # Name of the Phleb
+                # Write Date only if it's different from the previous row
+                ws[f'B{row}'] = formatted_appt_date if formatted_appt_date != prev_date else ""  # Date
+                ws[f'C{row}'] = ""  # No of Patient
+                ws[f'D{row}'] = ""  # Patient ID
+                ws[f'E{row}'] = ""  # patient bod
+                ws[f'F{row}'] = patient_name  # Name of Patient
+                ws[f'G{row}'] = formatted_birthdate  # Patient Birthdate
+                # Write Facility only if it's different from the previous row
+                ws[f'H{row}'] = facility_final if facility_final != prev_facility else ""  # Facility Information
+                ws[f'I{row}'] = ""  # Patients ICD Code
+                ws[f'J{row}'] = ""  # From
+                ws[f'K{row}'] = ""  # To
+                ws[f'L{row}'] = ""  # Miles
+                ws[f'M{row}'] = ""  # To
+                ws[f'N{row}'] = ""  # Miles
+                ws[f'O{row}'] = ""  # To
+                ws[f'P{row}'] = ""  # Miles
+                ws[f'Q{row}'] = ""  # To
+                ws[f'R{row}'] = ""  # Miles
+                ws[f'S{row}'] = ""  # To
+                ws[f'T{row}'] = ""  # Miles
+                ws[f'U{row}'] = ""  # Total Miles
+                ws[f'V{row}'] = insurance_company  # Insurance Company
+                ws[f'W{row}'] = mem_id  # Mem ID
+                ws[f'X{row}'] = ""  # Group Mem ID
+                
+                # Update tracking variables
+                if formatted_appt_date:
+                    prev_date = formatted_appt_date
+                if facility_final:
+                    prev_facility = facility_final
+                
+                # Apply red highlighting for missing fields
+                red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
+                
+                # Check conditions for highlighting
+                insurance_present = bool(insurance_company and insurance_company.strip())
+                mem_id_present = bool(mem_id and mem_id.strip())
+                
+                # Condition 1: Insurance Company present but Mem ID NOT present
+                if insurance_present and not mem_id_present:
+                    ws[f'W{row}'].fill = red_fill  # Mem ID only
+                # Condition 2: Both Insurance Company and Mem ID NOT present
+                elif not insurance_present and not mem_id_present:
+                    ws[f'V{row}'].fill = red_fill  # Insurance Company
+                    ws[f'W{row}'].fill = red_fill  # Mem ID
+                # Condition 3: Both available - no highlighting (automatic)
+                
                 row += 1
         
         # Save Excel file
@@ -171,14 +295,24 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
         output_file = f"{pdf_filename}_{timestamp}.xlsx"
         wb.save(output_file)
         
-        # Close PDF
-        doc.close()
-        
         return output_file
     
     finally:
-        # Clean up temp file
-        os.unlink(pdf_path)
+        # Close PDF document properly
+        if doc is not None:
+            doc.close()
+        
+        # Clean up temp file with retry logic for Windows file locking
+        try:
+            os.unlink(pdf_path)
+        except PermissionError:
+            import time
+            time.sleep(0.5)  # Wait a bit for file to be released
+            try:
+                os.unlink(pdf_path)
+            except Exception as e:
+                # If still can't delete, just log it (temp files will be cleaned up by OS)
+                pass
 
 # Streamlit UI
 st.set_page_config(page_title="PDF Data Extractor", layout="centered")
