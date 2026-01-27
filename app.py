@@ -192,7 +192,32 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
             
             # Skip this page if it contains "DROP SHEET"
             if "DROP SHEET" in response_text.upper():
-                # Completely skip DROP SHEET pages - no row written, no highlighting
+                # Write a completely blank row for DROP SHEET pages
+                ws[f'A{row}'] = ""
+                ws[f'B{row}'] = ""
+                ws[f'C{row}'] = ""
+                ws[f'D{row}'] = ""
+                ws[f'E{row}'] = ""
+                ws[f'F{row}'] = ""
+                ws[f'G{row}'] = ""
+                ws[f'H{row}'] = ""
+                ws[f'I{row}'] = ""
+                ws[f'J{row}'] = ""
+                ws[f'K{row}'] = ""
+                ws[f'L{row}'] = ""
+                ws[f'M{row}'] = ""
+                ws[f'N{row}'] = ""
+                ws[f'O{row}'] = ""
+                ws[f'P{row}'] = ""
+                ws[f'Q{row}'] = ""
+                ws[f'R{row}'] = ""
+                ws[f'S{row}'] = ""
+                ws[f'T{row}'] = ""
+                ws[f'U{row}'] = ""
+                ws[f'V{row}'] = ""
+                ws[f'W{row}'] = ""
+                ws[f'X{row}'] = ""
+                row += 1
                 continue
             
             # Extract fields from response
@@ -223,10 +248,6 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
                     # Only set mem_id if Sub/Member No. has actual content (not empty)
                     if extracted_member and len(extracted_member.strip()) > 0:
                         mem_id = extracted_member
-            
-            # Check if this is a DROP SHEET page based on extracted content
-            if "DROP" in facility_info.upper() or "DROP" in patient_name.upper() or "DROP SHEET" in response_text.upper():
-                continue
             
             # Add all rows regardless of whether primary data is found
             # Only skip if completely empty
