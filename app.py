@@ -9,8 +9,15 @@ from mistralai import Mistral
 import tempfile
 from datetime import datetime as dt
 
-# Initialize Mistral client with Streamlit secrets
-api_key = st.secrets["mistral_api_key"]
+# Initialize Mistral client with Streamlit secrets or environment variable
+try:
+    api_key = st.secrets["mistral_api_key"]
+except KeyError:
+    api_key = os.environ.get("MISTRAL_API_KEY")
+    if not api_key:
+        st.error("❌ API Key not found. Please set 'mistral_api_key' in Streamlit secrets or MISTRAL_API_KEY environment variable.")
+        st.stop()
+
 client = Mistral(api_key=api_key)
 
 # Facility mapping list
