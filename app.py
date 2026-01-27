@@ -298,18 +298,25 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
                 # Apply red highlighting for missing fields
                 red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
                 
-                # Check conditions for highlighting
-                insurance_present = bool(insurance_company and insurance_company.strip())
-                mem_id_present = bool(mem_id and mem_id.strip())
+                # Check conditions for highlighting (only if NOT a DROP SHEET)
+                is_drop_sheet = "DROP SHEET" in response_text.upper()
                 
-                # Condition 1: Insurance Company present but Mem ID NOT present
-                if insurance_present and not mem_id_present:
-                    ws[f'W{row}'].fill = red_fill  # Mem ID only
-                # Condition 2: Both Insurance Company and Mem ID NOT present
-                elif not insurance_present and not mem_id_present:
-                    ws[f'V{row}'].fill = red_fill  # Insurance Company
-                    ws[f'W{row}'].fill = red_fill  # Mem ID
-                # Condition 3: Both available - no highlighting (automatic)
+                if not is_drop_sheet:
+                    insurance_present = bool(insurance_company and insurance_company.strip())
+                    mem_id_present = bool(mem_id and mem_id.strip())
+                    
+                    # Condition 1: Both Insurance Company AND Mem ID are blank
+                    # → Clear all three fields (Insurance Company, Mem ID, Group Mem ID)
+                    if not insurance_present and not mem_id_present:
+                        ws[f'V{row}'] = ""  # Insurance Company
+                        ws[f'W{row}'] = ""  # Mem ID
+                        ws[f'X{row}'] = ""  # Group Mem ID
+                    
+                    # Condition 2: Insurance Company is available BUT Mem ID is blank
+                    # → Highlight Mem ID and Group Mem ID in red
+                    elif insurance_present and not mem_id_present:
+                        ws[f'W{row}'].fill = red_fill  # Mem ID
+                        ws[f'X{row}'].fill = red_fill  # Group Mem ID
                 
                 row += 1
         
