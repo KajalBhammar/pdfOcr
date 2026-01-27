@@ -51,7 +51,7 @@ facility_list = [
 def match_facility(extracted_facility):
     """Match extracted facility against the facility list"""
     if not extracted_facility or extracted_facility.lower() == "not found":
-        return "Not found"
+        return ""
     
     extracted_lower = extracted_facility.lower()
     
@@ -71,13 +71,13 @@ def match_facility(extracted_facility):
             if len(part) > 5 and part in extracted_lower:
                 return facility
     
-    return "Not found"
+    return ""
 
-def format_date_to_ddmmyyyy(date_str, default_date="01/01/2000", is_required=False):
+def format_date_to_ddmmyyyy(date_str, default_date="", is_required=False):
     """Convert date string to dd/mm/yyyy format"""
     if not date_str or date_str.lower() == "not found":
-        # If date is required (like for appointment dates), use default; otherwise return empty
-        return default_date if is_required else ""
+        # Return empty string for all cases
+        return ""
     
     date_str = date_str.strip()
     
@@ -98,8 +98,8 @@ def format_date_to_ddmmyyyy(date_str, default_date="01/01/2000", is_required=Fal
         except ValueError:
             continue
     
-    # If no format matches, return default if required, otherwise return empty
-    return default_date if is_required else ""
+    # If no format matches, return empty string
+    return ""
 
 def extract_from_pdf(pdf_file, progress_bar, status_text):
     """Extract data from PDF and return Excel file"""
@@ -166,7 +166,7 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Extract ONLY PRINTED/TYPED text from this document. Skip all handwritten text completely.\n\nExtract the following information:\n1. Appointment Date (Appt Date)\n2. Name of Patient\n3. Patient Birthdate (DOB)\n4. Facility Information (Include BOTH facility name AND address together)\n5. Primary Insurance Company\n6. Sub/Member No. (Member ID)\n\nIMPORTANT FOR PATIENT NAME: Copy the name EXACTLY as it appears in the PDF. Do NOT rearrange, reformat, or change the order. If it says 'DAVID FREITAS W', write 'DAVID FREITAS W' - do NOT change it to 'FREITAS, DAVID'. Extract it as-is without any modifications.\n\nReturn the data in this format:\nAppt Date: [date]\nName of Patient: [name - COPY EXACTLY AS APPEARS IN PDF, DO NOT CHANGE FORMAT]\nPatient Birthdate: [DOB in any date format found]\nFacility Information: [facility name and address]\nPrimary: [Insurance Company name]\nSub/Member No.: [Member ID]\n\nIf any field is not found or is handwritten, write 'Not found'.\nFor Facility Information, extract and combine the facility name with its complete address on the same line.\nReturn all found printed text, do NOT skip pages."},
+                        {"type": "text", "text": "Extract ONLY PRINTED/TYPED text from this document. Skip all handwritten text completely.\n\nExtract the following information:\n1. Appointment Date (Appt Date)\n2. Name of Patient\n3. Patient Birthdate (DOB)\n4. Facility Information (Include BOTH facility name AND address together)\n5. Primary Insurance Company\n6. Sub/Member No. (Member ID)\n\nIMPORTANT FOR PATIENT NAME: Copy the name EXACTLY as it appears in the PDF. Do NOT rearrange, reformat, or change the order. If it says 'DAVID FREITAS W', write 'DAVID FREITAS W' - do NOT change it to 'FREITAS, DAVID'. Extract it as-is without any modifications.\n\nReturn the data in this format:\nAppt Date: [date]\nName of Patient: [name - COPY EXACTLY AS APPEARS IN PDF, DO NOT CHANGE FORMAT]\nPatient Birthdate: [DOB in any date format found]\nFacility Information: [facility name and address]\nPrimary: [Insurance Company name]\nSub/Member No.: [Member ID]\n\nIf any field is not found or is handwritten, leave it blank.\nFor Facility Information, extract and combine the facility name with its complete address on the same line.\nReturn all found printed text, do NOT skip pages."},
                         {
                             "type": "image_url",
                             "image_url": f"data:image/png;base64,{image_base64}"
@@ -215,35 +215,27 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
                     facility_info = line.split("Facility Information:")[-1].strip().replace("*", "")
                 elif "Primary:" in line:
                     extracted_primary = line.split("Primary:")[-1].strip().replace("*", "")
-                    # Only set insurance_company if Primary has actual content (not "Not found" or empty)
-                    if extracted_primary and extracted_primary.lower() != "not found" and len(extracted_primary.strip()) > 0:
+                    # Only set insurance_company if Primary has actual content (not empty)
+                    if extracted_primary and len(extracted_primary.strip()) > 0:
                         insurance_company = extracted_primary
                 elif "Sub/Member No.:" in line:
                     extracted_member = line.split("Sub/Member No.:")[-1].strip().replace("*", "")
-                    # Only set mem_id if Sub/Member No. has actual content
-                    if extracted_member and extracted_member.lower() != "not found" and len(extracted_member.strip()) > 0:
+                    # Only set mem_id if Sub/Member No. has actual content (not empty)
+                    if extracted_member and len(extracted_member.strip()) > 0:
                         mem_id = extracted_member
             
             # Add all rows regardless of whether primary data is found
             # Only skip if completely empty
-            has_any_data = (patient_name and patient_name.lower() != "not found") or \
-                          (facility_info and facility_info.lower() != "not found") or \
-                          (appt_date and appt_date.lower() != "not found")
+            has_any_data = (patient_name and len(patient_name.strip()) > 0) or \
+                          (facility_info and len(facility_info.strip()) > 0) or \
+                          (appt_date and len(appt_date.strip()) > 0)
             
             if has_any_data:
                 facility_final = match_facility(facility_info)
                 
                 # Format dates to dd/mm/yyyy
-                # Appointment date is optional - leave blank if missing
-                formatted_appt_date = format_date_to_ddmmyyyy(appt_date, default_date="", is_required=False)
-                # Birthdate is optional but should be blank if missing, not "Not found"
-                formatted_birthdate = format_date_to_ddmmyyyy(patient_birthdate, default_date="", is_required=False)
-                
-                # Convert "Not found" to empty strings for all fields
-                patient_name = "" if patient_name.lower() == "not found" else patient_name
-                facility_final = "" if facility_final.lower() == "not found" else facility_final
-                insurance_company = "" if insurance_company.lower() == "not found" else insurance_company
-                mem_id = "" if mem_id.lower() == "not found" else mem_id
+                formatted_appt_date = format_date_to_ddmmyyyy(appt_date)
+                formatted_birthdate = format_date_to_ddmmyyyy(patient_birthdate)
                 
                 ws[f'A{row}'] = ""  # Name of the Phleb
                 # Write Date only if it's different from the previous row
