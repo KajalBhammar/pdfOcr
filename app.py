@@ -166,7 +166,7 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "IMPORTANT: First check if this page contains 'DROP SHEET'. If it does, respond ONLY with:\nDROP SHEET\n\nDo NOT extract any data from DROP SHEET pages.\n\n---\n\nIf this is NOT a DROP SHEET page, extract ONLY PRINTED/TYPED text from this document. Skip all handwritten text completely.\n\nExtract the following information:\n1. Appointment Date (Appt Date)\n2. Name of Patient\n3. Patient Birthdate (DOB)\n4. Facility Information (Include BOTH facility name AND address together)\n5. Primary Insurance Company\n6. Sub/Member No. (Member ID)\n\nIMPORTANT FOR PATIENT NAME: Copy the name EXACTLY as it appears in the PDF. Do NOT rearrange, reformat, or change the order. If it says 'DAVID FREITAS W', write 'DAVID FREITAS W' - do NOT change it to 'FREITAS, DAVID'. Extract it as-is without any modifications.\n\nReturn the data in this format:\nAppt Date: [date]\nName of Patient: [name - COPY EXACTLY AS APPEARS IN PDF, DO NOT CHANGE FORMAT]\nPatient Birthdate: [DOB in any date format found]\nFacility Information: [facility name and address]\nPrimary: [Insurance Company name]\nSub/Member No.: [Member ID]\n\nIf any field is not found or is handwritten, leave it blank.\nFor Facility Information, extract and combine the facility name with its complete address on the same line.\nReturn all found printed text, do NOT skip pages."},
+                        {"type": "text", "text": "IMPORTANT: First check if this page contains 'DROP SHEET'. If it does, respond ONLY with:\nDROP SHEET\n\nDo NOT extract any data from DROP SHEET pages.\n\n---\n\nIf this is NOT a DROP SHEET page, extract ONLY PRINTED/TYPED text from this document. Skip all handwritten text completely.\n\nExtract the following information:\n1. Appointment Date (Appt Date)\n2. Name of Patient\n3. Patient Birthdate (DOB)\n4. Facility Information (Include BOTH facility name AND address together)\n5. Primary Insurance Company\n6. Sub/Member No. (Member ID)\n7. Diagnosis Codes - Extract all diagnosis/ICD codes from unstructured medical text\n\nIMPORTANT FOR PATIENT NAME: Copy the name EXACTLY as it appears in the PDF. Do NOT rearrange, reformat, or change the order. If it says 'DAVID FREITAS W', write 'DAVID FREITAS W' - do NOT change it to 'FREITAS, DAVID'. Extract it as-is without any modifications.\n\nIMPORTANT FOR DIAGNOSIS CODES:\n- Identify all diagnosis codes in the text (e.g., E11.9, 150.9, 110, I10, J44.9, etc.)\n- Treat the code itself as the unique identifier\n- Ignore descriptions, capitalization differences, punctuation, and line breaks\n- If the same code appears multiple times (even with different descriptions), include it only once\n- If different codes appear, list all unique codes\n- Output only the final list of unique codes, separated by commas with no extra text\n- Do not include explanations or descriptions, only codes\n\nReturn the data in this format:\nAppt Date: [date]\nName of Patient: [name - COPY EXACTLY AS APPEARS IN PDF, DO NOT CHANGE FORMAT]\nPatient Birthdate: [DOB in any date format found]\nFacility Information: [facility name and address]\nPrimary: [Insurance Company name]\nSub/Member No.: [Member ID]\nDiagnosis Codes: [code1, code2, code3]\n\nIf any field is not found or is handwritten, leave it blank.\nFor Facility Information, extract and combine the facility name with its complete address on the same line.\nFor Diagnosis Codes, return only comma-separated codes with no extra text.\nReturn all found printed text, do NOT skip pages."},
                         {
                             "type": "image_url",
                             "image_url": f"data:image/png;base64,{image_base64}"
@@ -228,6 +228,7 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
             facility_info = ""
             insurance_company = ""
             mem_id = ""
+            diagnosis_codes = ""
             
             for line in lines:
                 if "Appt Date:" in line:
@@ -248,6 +249,11 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
                     # Only set mem_id if Sub/Member No. has actual content (not empty)
                     if extracted_member and len(extracted_member.strip()) > 0:
                         mem_id = extracted_member
+                elif "Diagnosis Codes:" in line:
+                    extracted_codes = line.split("Diagnosis Codes:")[-1].strip().replace("*", "")
+                    # Only set diagnosis_codes if it has actual content (not empty)
+                    if extracted_codes and len(extracted_codes.strip()) > 0:
+                        diagnosis_codes = extracted_codes
             
             # Add all rows regardless of whether primary data is found
             # Only skip if completely empty
@@ -272,7 +278,7 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
                 ws[f'G{row}'] = formatted_birthdate  # Patient Birthdate
                 # Write Facility only if it's different from the previous row
                 ws[f'H{row}'] = facility_final if facility_final != prev_facility else ""  # Facility Information
-                ws[f'I{row}'] = ""  # Patients ICD Code
+                ws[f'I{row}'] = diagnosis_codes  # Patients ICD Code
                 ws[f'J{row}'] = ""  # From
                 ws[f'K{row}'] = ""  # To
                 ws[f'L{row}'] = ""  # Miles
