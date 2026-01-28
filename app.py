@@ -345,41 +345,112 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
                 # If still can't delete, just log it (temp files will be cleaned up by OS)
                 pass
 
-# Streamlit UI
-st.set_page_config(page_title="PDF Data Extractor", layout="centered")
-st.title("📄 PDF Data Extractor")
-
-# File uploader
-uploaded_file = st.file_uploader("Upload PDF", type="pdf")
-
-if uploaded_file is not None:
-    st.success(f"✅ File uploaded: {uploaded_file.name}")
+def extract_unique_diagnosis_codes(text):
+    """Extract unique diagnosis codes from medical text"""
+    import re
     
-    if st.button("🔄 Process PDF", use_container_width=True):
-        # Progress bar and status
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+    # Pattern to match diagnosis codes (e.g., E11.9, 150.9, 110, I10, J44.9, etc.)
+    # Matches: letters/numbers followed by optional dot and numbers
+    pattern = r'\b([A-Z0-9]+(?:\.[0-9]+)?)\b'
+    
+    matches = re.findall(pattern, text)
+    
+    # Filter to keep only codes that look like diagnosis codes
+    # Diagnosis codes typically have letters followed by numbers or are numeric codes
+    codes = []
+    for match in matches:
+        # Check if it's a valid diagnosis code pattern
+        if re.match(r'^[A-Z]\d+(?:\.\d+)?$', match) or re.match(r'^\d+(?:\.\d+)?$', match):
+            codes.append(match)
+    
+    # Remove duplicates while preserving order, case-insensitive
+    seen = set()
+    unique_codes = []
+    for code in codes:
+        code_upper = code.upper()
+        if code_upper not in seen:
+            seen.add(code_upper)
+            unique_codes.append(code)
+    
+    return unique_codes
+
+# Streamlit UI
+st.set_page_config(page_title="PDF Data Extractor & Diagnosis Code Extractor", layout="centered")
+st.title("📄 PDF Data Extractor & 🏥 Diagnosis Code Extractor")
+
+# Create tabs
+tab1, tab2 = st.tabs(["PDF Data Extractor", "Diagnosis Code Extractor"])
+
+# Tab 1: PDF Data Extractor
+with tab1:
+    # File uploader
+    uploaded_file = st.file_uploader("Upload PDF", type="pdf")
+
+    if uploaded_file is not None:
+        st.success(f"✅ File uploaded: {uploaded_file.name}")
         
-        try:
-            # Process PDF
-            output_file = extract_from_pdf(uploaded_file, progress_bar, status_text)
+        if st.button("🔄 Process PDF", use_container_width=True):
+            # Progress bar and status
+            progress_bar = st.progress(0)
+            status_text = st.empty()
             
-            # Complete
-            progress_bar.progress(1.0)
-            status_text.text("✅ Processing complete!")
+            try:
+                # Process PDF
+                output_file = extract_from_pdf(uploaded_file, progress_bar, status_text)
+                
+                # Complete
+                progress_bar.progress(1.0)
+                status_text.text("✅ Processing complete!")
+                
+                # Download button
+                with open(output_file, "rb") as file:
+                    st.download_button(
+                        label="📥 Download Excel File",
+                        data=file,
+                        file_name=os.path.basename(output_file),
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+                
+                # Clean up
+                os.unlink(output_file)
             
-            # Download button
-            with open(output_file, "rb") as file:
-                st.download_button(
-                    label="📥 Download Excel File",
-                    data=file,
-                    file_name=os.path.basename(output_file),
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
+            except Exception as e:
+                st.error(f"❌ Error: {str(e)}")
+
+# Tab 2: Diagnosis Code Extractor
+with tab2:
+    st.header("Extract Unique Diagnosis Codes")
+    st.write("Paste unstructured medical text containing diagnosis codes. The tool will extract and deduplicate them.")
+    
+    # Text area for input
+    medical_text = st.text_area(
+        "Paste medical text here:",
+        height=200,
+        placeholder="Example: Patient has E11.9 diabetes, 150.9 hypertension, and E11.9 type 2 diabetes..."
+    )
+    
+    if st.button("🔍 Extract Diagnosis Codes", use_container_width=True):
+        if medical_text.strip():
+            unique_codes = extract_unique_diagnosis_codes(medical_text)
             
-            # Clean up
-            os.unlink(output_file)
-        
-        except Exception as e:
-            st.error(f"❌ Error: {str(e)}")
+            if unique_codes:
+                # Display unique codes as comma-separated list
+                codes_output = ", ".join(unique_codes)
+                st.success("✅ Unique Diagnosis Codes:")
+                st.code(codes_output, language="text")
+                
+                # Copy to clipboard button
+                st.write("**Result:**")
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.text_input("Codes:", value=codes_output, disabled=True)
+                with col2:
+                    st.write("")
+                    st.write("")
+                    if st.button("📋 Copy", use_container_width=True):
+                        st.write("Copied to clipboard!")
+            else:
+                st.warning("⚠️ No diagnosis codes found in the text.")
+        else:
+            st.warning("⚠️ Please enter some medical text.")
