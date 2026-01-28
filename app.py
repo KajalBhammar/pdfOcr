@@ -166,7 +166,7 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "IMPORTANT: First, check if this page contains the barcode 'EC31712065'. If this barcode is NOT present, respond ONLY with:\nNO BARCODE\n\nDo NOT process pages without this barcode.\n\n---\n\nIf the barcode 'EC31712065' IS present, then extract ONLY PRINTED/TYPED text from this document. Skip all handwritten text completely.\n\nExtract the following information:\n1. Appointment Date (Appt Date)\n2. Name of Patient\n3. Patient Birthdate (DOB)\n4. Facility Information (Include BOTH facility name AND address together)\n5. Primary Insurance Company\n6. Sub/Member No. (Member ID)\n7. Diagnosis Codes - Extract all diagnosis/ICD codes from unstructured medical text\n\nIMPORTANT FOR PATIENT NAME: Copy the name EXACTLY as it appears in the PDF. Do NOT rearrange, reformat, or change the order. If it says 'DAVID FREITAS W', write 'DAVID FREITAS W' - do NOT change it to 'FREITAS, DAVID'. Extract it as-is without any modifications.\n\nIMPORTANT FOR DIAGNOSIS CODES:\n- Identify all diagnosis codes in the text (e.g., E11.9, 150.9, 110, I10, J44.9, etc.)\n- Treat the code itself as the unique identifier\n- Ignore descriptions, capitalization differences, punctuation, and line breaks\n- If the same code appears multiple times (even with different descriptions), include it only once\n- If different codes appear, list all unique codes\n- Output only the final list of unique codes, separated by commas with no extra text\n- Do not include explanations or descriptions, only codes\n\nReturn the data in this format:\nAppt Date: [date]\nName of Patient: [name - COPY EXACTLY AS APPEARS IN PDF, DO NOT CHANGE FORMAT]\nPatient Birthdate: [DOB in any date format found]\nFacility Information: [facility name and address]\nPrimary: [Insurance Company name]\nSub/Member No.: [Member ID]\nDiagnosis Codes: [code1, code2, code3]\n\nIf any field is not found or is handwritten, leave it blank.\nFor Facility Information, extract and combine the facility name with its complete address on the same line.\nFor Diagnosis Codes, return only comma-separated codes with no extra text.\nReturn all found printed text, do NOT skip pages."},
+                        {"type": "text", "text": "IMPORTANT: First check if this page contains 'DROP SHEET'. If it does, respond ONLY with:\nDROP SHEET\n\nDo NOT extract any data from DROP SHEET pages.\n\n---\n\nIf this is NOT a DROP SHEET page, extract ONLY PRINTED/TYPED text from this document. Skip all handwritten text completely.\n\nExtract the following information:\n1. Appointment Date (Appt Date)\n2. Name of Patient\n3. Patient Birthdate (DOB)\n4. Facility Information (Include BOTH facility name AND address together)\n5. Primary Insurance Company\n6. Sub/Member No. (Member ID)\n7. Diagnosis Codes - Extract all diagnosis/ICD codes from unstructured medical text\n\nIMPORTANT FOR PATIENT NAME: Copy the name EXACTLY as it appears in the PDF. Do NOT rearrange, reformat, or change the order. If it says 'DAVID FREITAS W', write 'DAVID FREITAS W' - do NOT change it to 'FREITAS, DAVID'. Extract it as-is without any modifications.\n\nIMPORTANT FOR DIAGNOSIS CODES:\n- Identify all diagnosis codes in the text (e.g., E11.9, 150.9, 110, I10, J44.9, etc.)\n- Treat the code itself as the unique identifier\n- Ignore descriptions, capitalization differences, punctuation, and line breaks\n- If the same code appears multiple times (even with different descriptions), include it only once\n- If different codes appear, list all unique codes\n- Output only the final list of unique codes, separated by commas with no extra text\n- Do not include explanations or descriptions, only codes\n\nReturn the data in this format:\nAppt Date: [date]\nName of Patient: [name - COPY EXACTLY AS APPEARS IN PDF, DO NOT CHANGE FORMAT]\nPatient Birthdate: [DOB in any date format found]\nFacility Information: [facility name and address]\nPrimary: [Insurance Company name]\nSub/Member No.: [Member ID]\nDiagnosis Codes: [code1, code2, code3]\n\nIf any field is not found or is handwritten, leave it blank.\nFor Facility Information, extract and combine the facility name with its complete address on the same line.\nFor Diagnosis Codes, return only comma-separated codes with no extra text.\nReturn all found printed text, do NOT skip pages."},
                         {
                             "type": "image_url",
                             "image_url": f"data:image/png;base64,{image_base64}"
@@ -190,9 +190,9 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
             else:
                 response_text = str(response.outputs[0])
             
-            # Skip this page if it doesn't contain the required barcode
-            if "NO BARCODE" in response_text.upper():
-                # Write a completely blank row for pages without barcode
+            # Skip this page if it contains "DROP SHEET"
+            if "DROP SHEET" in response_text.upper():
+                # Write a completely blank row for DROP SHEET pages
                 ws[f'A{row}'] = ""
                 ws[f'B{row}'] = ""
                 ws[f'C{row}'] = ""
@@ -304,21 +304,25 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
                 # Apply red highlighting for missing fields
                 red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
                 
-                insurance_present = bool(insurance_company and insurance_company.strip())
-                mem_id_present = bool(mem_id and mem_id.strip())
+                # Check conditions for highlighting (only if NOT a DROP SHEET)
+                is_drop_sheet = "DROP SHEET" in response_text.upper()
                 
-                # Condition 1: Both Insurance Company AND Mem ID are blank
-                # → Clear all three fields (Insurance Company, Mem ID, Group Mem ID)
-                if not insurance_present and not mem_id_present:
-                    ws[f'V{row}'] = ""  # Insurance Company
-                    ws[f'W{row}'] = ""  # Mem ID
-                    ws[f'X{row}'] = ""  # Group Mem ID
-                
-                # Condition 2: Insurance Company is available BUT Mem ID is blank
-                # → Highlight Mem ID and Group Mem ID in red
-                elif insurance_present and not mem_id_present:
-                    ws[f'W{row}'].fill = red_fill  # Mem ID
-                    ws[f'X{row}'].fill = red_fill  # Group Mem ID
+                if not is_drop_sheet:
+                    insurance_present = bool(insurance_company and insurance_company.strip())
+                    mem_id_present = bool(mem_id and mem_id.strip())
+                    
+                    # Condition 1: Both Insurance Company AND Mem ID are blank
+                    # → Clear all three fields (Insurance Company, Mem ID, Group Mem ID)
+                    if not insurance_present and not mem_id_present:
+                        ws[f'V{row}'] = ""  # Insurance Company
+                        ws[f'W{row}'] = ""  # Mem ID
+                        ws[f'X{row}'] = ""  # Group Mem ID
+                    
+                    # Condition 2: Insurance Company is available BUT Mem ID is blank
+                    # → Highlight Mem ID and Group Mem ID in red
+                    elif insurance_present and not mem_id_present:
+                        ws[f'W{row}'].fill = red_fill  # Mem ID
+                        ws[f'X{row}'].fill = red_fill  # Group Mem ID
                 
                 row += 1
         
