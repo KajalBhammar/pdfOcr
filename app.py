@@ -1,6 +1,6 @@
 import streamlit as st
 import base64
-import fitz  # PyMuPDF
+import fitz
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 import os
@@ -9,7 +9,6 @@ from mistralai import Mistral
 import tempfile
 from datetime import datetime as dt
 
-# Initialize Mistral client with Streamlit secrets or environment variable
 try:
     api_key = st.secrets["mistral_api_key"]
 except KeyError:
@@ -20,7 +19,6 @@ except KeyError:
 
 client = Mistral(api_key=api_key)
 
-# Facility mapping list
 facility_list = [
     "Alliance Health at Marina Bay, 2 Seaport, Quincy, MA",
     "Alliance Health at West Acres, 804 Pleasant St, Brockton, MA",
@@ -49,7 +47,6 @@ facility_list = [
 ]
 
 def match_facility(extracted_facility):
-    """Match extracted facility against the facility list"""
     if not extracted_facility or extracted_facility.lower() == "not found":
         return ""
     
@@ -73,15 +70,13 @@ def match_facility(extracted_facility):
     
     return ""
 
+
 def format_date_to_ddmmyyyy(date_str, default_date="", is_required=False):
-    """Convert date string to dd/mm/yyyy format"""
     if not date_str or date_str.lower() == "not found":
-        # Return empty string for all cases
         return ""
     
     date_str = date_str.strip()
     
-    # Common date formats to try
     date_formats = [
         "%m/%d/%Y", "%m/%d/%y", "%m-%d-%Y", "%m-%d-%y",
         "%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y",
@@ -94,28 +89,24 @@ def format_date_to_ddmmyyyy(date_str, default_date="", is_required=False):
     for fmt in date_formats:
         try:
             parsed_date = dt.strptime(date_str, fmt)
-            return parsed_date.strftime("%d/%m/%Y")
+            return parsed_date.strftime("%m/%d/%Y")
         except ValueError:
             continue
     
-    # If no format matches, return empty string
     return ""
 
+
 def extract_from_pdf(pdf_file, progress_bar, status_text):
-    """Extract data from PDF and return Excel file"""
-    # Save PDF to temp file
     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
         tmp.write(pdf_file.read())
         pdf_path = tmp.name
     
     doc = None
     try:
-        # Convert PDF to images
         doc = fitz.open(pdf_path)
         total_pages = len(doc)
         images = [doc[page_num].get_pixmap(matrix=fitz.Matrix(2, 2)) for page_num in range(total_pages)]
         
-        # Create Excel workbook
         wb = Workbook()
         ws = wb.active
         ws.title = "Extracted Data"
@@ -150,23 +141,22 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
         prev_date = ""
         prev_facility = ""
         
-        # Process each page
         for page_num, pixmap in enumerate(images, 1):
-            # Update progress
             progress = page_num / total_pages
             progress_bar.progress(progress)
             status_text.text(f"Processing page {page_num} of {total_pages}...")
             
-            # Convert pixmap to PNG bytes
             png_bytes = pixmap.tobytes("png")
             image_base64 = base64.b64encode(png_bytes).decode("utf-8")
             
-            # Extract data using Mistral
             inputs = [
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "IMPORTANT: First check if this page contains 'DROP SHEET'. If it does, respond ONLY with:\nDROP SHEET\n\nDo NOT extract any data from DROP SHEET pages.\n\n---\n\nIf this is NOT a DROP SHEET page, extract ONLY PRINTED/TYPED text from this document. Skip all handwritten text completely.\n\nExtract the following information:\n1. Appointment Date (Appt Date)\n2. Name of Patient\n3. Patient Birthdate (DOB)\n4. Facility Information (Include BOTH facility name AND address together)\n5. Primary Insurance Company\n6. Sub/Member No. (Member ID)\n7. Diagnosis Codes - Extract all diagnosis/ICD codes from unstructured medical text\n\nIMPORTANT FOR PATIENT NAME: Copy the name EXACTLY as it appears in the PDF. Do NOT rearrange, reformat, or change the order. If it says 'DAVID FREITAS W', write 'DAVID FREITAS W' - do NOT change it to 'FREITAS, DAVID'. Extract it as-is without any modifications.\n\nIMPORTANT FOR DIAGNOSIS CODES:\n- Identify all diagnosis codes in the text (e.g., E11.9, 150.9, 110, I10, J44.9, etc.)\n- Treat the code itself as the unique identifier\n- Ignore descriptions, capitalization differences, punctuation, and line breaks\n- If the same code appears multiple times (even with different descriptions), include it only once\n- If different codes appear, list all unique codes\n- Output only the final list of unique codes, separated by commas with no extra text\n- Do not include explanations or descriptions, only codes\n\nReturn the data in this format:\nAppt Date: [date]\nName of Patient: [name - COPY EXACTLY AS APPEARS IN PDF, DO NOT CHANGE FORMAT]\nPatient Birthdate: [DOB in any date format found]\nFacility Information: [facility name and address]\nPrimary: [Insurance Company name]\nSub/Member No.: [Member ID]\nDiagnosis Codes: [code1, code2, code3]\n\nIf any field is not found or is handwritten, leave it blank.\nFor Facility Information, extract and combine the facility name with its complete address on the same line.\nFor Diagnosis Codes, return only comma-separated codes with no extra text.\nReturn all found printed text, do NOT skip pages."},
+                        {
+                            "type": "text", 
+                            "text": "IMPORTANT: First check if this page contains 'DROP SHEET'. If it does, respond ONLY with:\nDROP SHEET\nBarcode Image: [YES or NO]\n\nWhere 'Barcode Image: YES' means there is a visible barcode/QR code image on the page.\n\nIf this page is a DROP SHEET without a barcode image, do NOT extract any data.\nIf this page is a DROP SHEET with a barcode image, continue to extract data.\n\n---\n\nIf this is NOT a DROP SHEET page, extract ONLY PRINTED/TYPED text from this document. Skip all handwritten text completely.\n\nExtract the following information:\n1. Appointment Date (Appt Date)\n2. Name of Patient\n3. Patient Birthdate (DOB)\n4. Facility Information (Include BOTH facility name AND address together)\n5. Primary Insurance Company\n6. Sub/Member No. (Member ID)\n7. Group Number (Group Mem ID)\n8. Diagnosis Codes - Extract all diagnosis/ICD codes from unstructured medical text\n\nIMPORTANT FOR PATIENT NAME: Copy the name EXACTLY as it appears in the PDF. Do NOT rearrange, reformat, or change the order. If it says 'DAVID FREITAS W', write 'DAVID FREITAS W' - do NOT change it to 'FREITAS, DAVID'. Extract it as-is without any modifications.\n\nIMPORTANT FOR DIAGNOSIS CODES:\n- Identify all diagnosis codes in the text (e.g., E11.9, 150.9, 110, I10, J44.9, etc.)\n- Treat the code itself as the unique identifier\n- Ignore descriptions, capitalization differences, punctuation, and line breaks\n- If the same code appears multiple times (even with different descriptions), include it only once\n- If different codes appear, list all unique codes\n- Output only the final list of unique codes, separated by commas with no extra text\n- Do not include explanations or descriptions, only codes\n\nReturn the data in this format:\nAppt Date: [date]\nName of Patient: [name - COPY EXACTLY AS APPEARS IN PDF, DO NOT CHANGE FORMAT]\nPatient Birthdate: [DOB in any date format found]\nFacility Information: [facility name and address]\nPrimary: [Insurance Company name]\nSub/Member No.: [Member ID]\nGroup Number: [Group Number]\nDiagnosis Codes: [code1, code2, code3]\n\nIf any field is not found or is handwritten, leave it blank.\nFor Facility Information, extract and combine the facility name with its complete address on the same line.\nFor Diagnosis Codes, return only comma-separated codes with no extra text.\nReturn all found printed text, do NOT skip pages."
+                        },
                         {
                             "type": "image_url",
                             "image_url": f"data:image/png;base64,{image_base64}"
@@ -180,7 +170,6 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
                 inputs=inputs
             )
             
-            # Parse response
             if hasattr(response.outputs[0], 'content'):
                 response_text = response.outputs[0].content
             elif hasattr(response.outputs[0], 'text'):
@@ -190,37 +179,11 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
             else:
                 response_text = str(response.outputs[0])
             
-            # Skip this page if it contains "DROP SHEET"
             if "DROP SHEET" in response_text.upper():
-                # Write a completely blank row for DROP SHEET pages
-                ws[f'A{row}'] = ""
-                ws[f'B{row}'] = ""
-                ws[f'C{row}'] = ""
-                ws[f'D{row}'] = ""
-                ws[f'E{row}'] = ""
-                ws[f'F{row}'] = ""
-                ws[f'G{row}'] = ""
-                ws[f'H{row}'] = ""
-                ws[f'I{row}'] = ""
-                ws[f'J{row}'] = ""
-                ws[f'K{row}'] = ""
-                ws[f'L{row}'] = ""
-                ws[f'M{row}'] = ""
-                ws[f'N{row}'] = ""
-                ws[f'O{row}'] = ""
-                ws[f'P{row}'] = ""
-                ws[f'Q{row}'] = ""
-                ws[f'R{row}'] = ""
-                ws[f'S{row}'] = ""
-                ws[f'T{row}'] = ""
-                ws[f'U{row}'] = ""
-                ws[f'V{row}'] = ""
-                ws[f'W{row}'] = ""
-                ws[f'X{row}'] = ""
-                row += 1
-                continue
+                has_barcode = "Barcode Image: YES" in response_text or "barcode image: yes" in response_text.lower()
+                if not has_barcode:
+                    continue
             
-            # Extract fields from response
             lines = response_text.split('\n')
             appt_date = ""
             patient_name = ""
@@ -228,6 +191,7 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
             facility_info = ""
             insurance_company = ""
             mem_id = ""
+            group_mem_id = ""
             diagnosis_codes = ""
             
             for line in lines:
@@ -241,92 +205,83 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
                     facility_info = line.split("Facility Information:")[-1].strip().replace("*", "")
                 elif "Primary:" in line:
                     extracted_primary = line.split("Primary:")[-1].strip().replace("*", "")
-                    # Only set insurance_company if Primary has actual content (not empty)
                     if extracted_primary and len(extracted_primary.strip()) > 0:
                         insurance_company = extracted_primary
                 elif "Sub/Member No.:" in line:
                     extracted_member = line.split("Sub/Member No.:")[-1].strip().replace("*", "")
-                    # Only set mem_id if Sub/Member No. has actual content (not empty)
                     if extracted_member and len(extracted_member.strip()) > 0:
                         mem_id = extracted_member
+                elif "Group Number:" in line:
+                    extracted_group = line.split("Group Number:")[-1].strip().replace("*", "")
+                    if extracted_group and len(extracted_group.strip()) > 0:
+                        group_mem_id = extracted_group
                 elif "Diagnosis Codes:" in line:
                     extracted_codes = line.split("Diagnosis Codes:")[-1].strip().replace("*", "")
-                    # Only set diagnosis_codes if it has actual content (not empty)
                     if extracted_codes and len(extracted_codes.strip()) > 0:
                         diagnosis_codes = extracted_codes
             
-            # Add all rows regardless of whether primary data is found
-            # Only skip if completely empty
             has_any_data = (patient_name and len(patient_name.strip()) > 0) or \
+                          (patient_birthdate and len(patient_birthdate.strip()) > 0) or \
                           (facility_info and len(facility_info.strip()) > 0) or \
-                          (appt_date and len(appt_date.strip()) > 0)
+                          (appt_date and len(appt_date.strip()) > 0) or \
+                          (insurance_company and len(insurance_company.strip()) > 0) or \
+                          (mem_id and len(mem_id.strip()) > 0) or \
+                          (diagnosis_codes and len(diagnosis_codes.strip()) > 0)
             
             if has_any_data:
                 facility_final = match_facility(facility_info)
                 
-                # Format dates to dd/mm/yyyy
                 formatted_appt_date = format_date_to_ddmmyyyy(appt_date)
                 formatted_birthdate = format_date_to_ddmmyyyy(patient_birthdate)
                 
-                ws[f'A{row}'] = ""  # Name of the Phleb
-                # Write Date only if it's different from the previous row
-                ws[f'B{row}'] = formatted_appt_date if formatted_appt_date != prev_date else ""  # Date
-                ws[f'C{row}'] = ""  # No of Patient
-                ws[f'D{row}'] = ""  # Patient ID
-                ws[f'E{row}'] = ""  # patient bod
-                ws[f'F{row}'] = patient_name  # Name of Patient
-                ws[f'G{row}'] = formatted_birthdate  # Patient Birthdate
-                # Write Facility only if it's different from the previous row
-                ws[f'H{row}'] = facility_final if facility_final != prev_facility else ""  # Facility Information
-                ws[f'I{row}'] = diagnosis_codes  # Patients ICD Code
-                ws[f'J{row}'] = ""  # From
-                ws[f'K{row}'] = ""  # To
-                ws[f'L{row}'] = ""  # Miles
-                ws[f'M{row}'] = ""  # To
-                ws[f'N{row}'] = ""  # Miles
-                ws[f'O{row}'] = ""  # To
-                ws[f'P{row}'] = ""  # Miles
-                ws[f'Q{row}'] = ""  # To
-                ws[f'R{row}'] = ""  # Miles
-                ws[f'S{row}'] = ""  # To
-                ws[f'T{row}'] = ""  # Miles
-                ws[f'U{row}'] = ""  # Total Miles
-                ws[f'V{row}'] = insurance_company  # Insurance Company
-                ws[f'W{row}'] = mem_id  # Mem ID
-                ws[f'X{row}'] = ""  # Group Mem ID
+                ws[f'A{row}'] = ""
+                ws[f'B{row}'] = formatted_appt_date if formatted_appt_date != prev_date else ""
+                ws[f'C{row}'] = ""
+                ws[f'D{row}'] = ""
+                ws[f'E{row}'] = ""
+                ws[f'F{row}'] = patient_name
+                ws[f'G{row}'] = formatted_birthdate
+                ws[f'H{row}'] = facility_final if facility_final != prev_facility else ""
+                ws[f'I{row}'] = diagnosis_codes
+                ws[f'J{row}'] = ""
+                ws[f'K{row}'] = ""
+                ws[f'L{row}'] = ""
+                ws[f'M{row}'] = ""
+                ws[f'N{row}'] = ""
+                ws[f'O{row}'] = ""
+                ws[f'P{row}'] = ""
+                ws[f'Q{row}'] = ""
+                ws[f'R{row}'] = ""
+                ws[f'S{row}'] = ""
+                ws[f'T{row}'] = ""
+                ws[f'U{row}'] = ""
+                ws[f'V{row}'] = insurance_company
+                ws[f'W{row}'] = mem_id
+                ws[f'X{row}'] = group_mem_id
                 
-                # Update tracking variables
                 if formatted_appt_date:
                     prev_date = formatted_appt_date
                 if facility_final:
                     prev_facility = facility_final
                 
-                # Apply red highlighting for missing fields
                 red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
                 
-                # Check conditions for highlighting (only if NOT a DROP SHEET)
                 is_drop_sheet = "DROP SHEET" in response_text.upper()
                 
                 if not is_drop_sheet:
                     insurance_present = bool(insurance_company and insurance_company.strip())
                     mem_id_present = bool(mem_id and mem_id.strip())
+                    group_mem_id_present = bool(group_mem_id and group_mem_id.strip())
                     
-                    # Condition 1: Both Insurance Company AND Mem ID are blank
-                    # → Clear all three fields (Insurance Company, Mem ID, Group Mem ID)
-                    if not insurance_present and not mem_id_present:
-                        ws[f'V{row}'] = ""  # Insurance Company
-                        ws[f'W{row}'] = ""  # Mem ID
-                        ws[f'X{row}'] = ""  # Group Mem ID
-                    
-                    # Condition 2: Insurance Company is available BUT Mem ID is blank
-                    # → Highlight Mem ID and Group Mem ID in red
-                    elif insurance_present and not mem_id_present:
-                        ws[f'W{row}'].fill = red_fill  # Mem ID
-                        ws[f'X{row}'].fill = red_fill  # Group Mem ID
+                    if not insurance_present:
+                        ws[f'V{row}'].fill = red_fill
+                    if not mem_id_present:
+                        ws[f'W{row}'].fill = red_fill
+                    if not group_mem_id_present:
+                        ws[f'X{row}'].fill = red_fill
                 
                 row += 1
         
-        # Save Excel file
         pdf_filename = os.path.splitext(pdf_file.name)[0]
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_file = f"{pdf_filename}_{timestamp}.xlsx"
@@ -335,41 +290,30 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
         return output_file
     
     finally:
-        # Close PDF document properly
         if doc is not None:
             doc.close()
         
-        # Clean up temp file with retry logic for Windows file locking
         try:
             os.unlink(pdf_path)
         except PermissionError:
             import time
-            time.sleep(0.5)  # Wait a bit for file to be released
+            time.sleep(0.5)
             try:
                 os.unlink(pdf_path)
             except Exception as e:
-                # If still can't delete, just log it (temp files will be cleaned up by OS)
                 pass
-
 def extract_unique_diagnosis_codes(text):
-    """Extract unique diagnosis codes from medical text"""
     import re
     
-    # Pattern to match diagnosis codes (e.g., E11.9, 150.9, 110, I10, J44.9, etc.)
-    # Matches: letters/numbers followed by optional dot and numbers
     pattern = r'\b([A-Z0-9]+(?:\.[0-9]+)?)\b'
     
     matches = re.findall(pattern, text)
     
-    # Filter to keep only codes that look like diagnosis codes
-    # Diagnosis codes typically have letters followed by numbers or are numeric codes
     codes = []
     for match in matches:
-        # Check if it's a valid diagnosis code pattern
         if re.match(r'^[A-Z]\d+(?:\.\d+)?$', match) or re.match(r'^\d+(?:\.\d+)?$', match):
             codes.append(match)
     
-    # Remove duplicates while preserving order, case-insensitive
     seen = set()
     unique_codes = []
     for code in codes:
@@ -380,35 +324,28 @@ def extract_unique_diagnosis_codes(text):
     
     return unique_codes
 
-# Streamlit UI
+
 st.set_page_config(page_title="PDF Data Extractor & Diagnosis Code Extractor", layout="centered")
 st.title("📄 PDF Data Extractor & 🏥 Diagnosis Code Extractor")
 
-# Create tabs
 tab1, tab2 = st.tabs(["PDF Data Extractor", "Diagnosis Code Extractor"])
 
-# Tab 1: PDF Data Extractor
 with tab1:
-    # File uploader
     uploaded_file = st.file_uploader("Upload PDF", type="pdf")
 
     if uploaded_file is not None:
         st.success(f"✅ File uploaded: {uploaded_file.name}")
         
         if st.button("🔄 Process PDF", use_container_width=True):
-            # Progress bar and status
             progress_bar = st.progress(0)
             status_text = st.empty()
             
             try:
-                # Process PDF
                 output_file = extract_from_pdf(uploaded_file, progress_bar, status_text)
                 
-                # Complete
                 progress_bar.progress(1.0)
                 status_text.text("✅ Processing complete!")
                 
-                # Download button
                 with open(output_file, "rb") as file:
                     st.download_button(
                         label="📥 Download Excel File",
@@ -418,18 +355,15 @@ with tab1:
                         use_container_width=True
                     )
                 
-                # Clean up
                 os.unlink(output_file)
             
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
 
-# Tab 2: Diagnosis Code Extractor
 with tab2:
     st.header("Extract Unique Diagnosis Codes")
     st.write("Paste unstructured medical text containing diagnosis codes. The tool will extract and deduplicate them.")
     
-    # Text area for input
     medical_text = st.text_area(
         "Paste medical text here:",
         height=200,
@@ -441,12 +375,10 @@ with tab2:
             unique_codes = extract_unique_diagnosis_codes(medical_text)
             
             if unique_codes:
-                # Display unique codes as comma-separated list
                 codes_output = ", ".join(unique_codes)
                 st.success("✅ Unique Diagnosis Codes:")
                 st.code(codes_output, language="text")
                 
-                # Copy to clipboard button
                 st.write("**Result:**")
                 col1, col2 = st.columns([3, 1])
                 with col1:
