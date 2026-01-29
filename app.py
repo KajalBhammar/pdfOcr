@@ -183,6 +183,8 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
             has_barcode = "Barcode Image Present: YES" in response_text or "barcode image present: yes" in response_text.lower()
             
             if not has_barcode:
+                # Add a blank row for skipped pages
+                row += 1
                 continue
             
             lines = response_text.split('\n')
