@@ -149,13 +149,161 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
             png_bytes = pixmap.tobytes("png")
             image_base64 = base64.b64encode(png_bytes).decode("utf-8")
             
+            prompt_text = """You are a medical document extraction engine.
+
+You will receive a single PDF page image.
+
+Your job is to decide whether this page is a valid PATIENT REPORT with a BARCODE.
+Only pages with a visible barcode are allowed to be processed.
+
+----------------------------------------------------
+STEP 1 — BARCODE CHECK
+
+If NO barcode or QR code is visible:
+Return ONLY:
+Barcode Image Present: NO
+and STOP.
+
+If a barcode is visible:
+Continue.
+
+----------------------------------------------------
+STEP 2 — DROP SHEET RULE
+
+If the page contains the words "DROP SHEET" and also contains a barcode → STOP and return:
+Barcode Image Present: NO
+
+Drop sheets must NEVER be extracted.
+
+----------------------------------------------------
+STEP 3 — TEXT RULES
+
+• Extract ONLY printed or typed text  
+• Ignore ALL handwritten text  
+• Never guess, infer, or copy values between fields  
+• Never invent missing data  
+
+----------------------------------------------------
+STEP 4 — REQUIRED FIELDS (ALWAYS PRESENT ON BARCODE REPORTS)
+
+From PATIENT INFORMATION section extract:
+
+Patient Name  
+Look for:
+Name:
+Patient:
+Patient Name:
+Name of Patient:
+
+DOB  
+Look for:
+DOB:
+Date of Birth:
+Birthdate:
+Birth Date:
+D.O.B.:
+
+These two MUST be found or the page is invalid.
+
+----------------------------------------------------
+STEP 5 — FACILITY INFORMATION
+
+From FACILITY INFORMATION section extract:
+• Facility Name
+• Facility Address
+
+Return them combined as:
+Facility Name, Address
+
+This value must later be matched against this allowed list:
+
+Alliance Health at Marina Bay, 2 Seaport, Quincy, MA  
+Alliance Health at West Acres, 804 Pleasant St, Brockton, MA  
+Sherrill House, 135 S Huntington Ave, Jamaica Plain, MA  
+Alliance Health at Maples, 90 Taunton St, Wrentham, MA 02097  
+Oak Knoll, 9 Ambetter Dr, Framingham, MA  
+Sippican Rehab & Healthcare, 15 Mill St, Marion, MA  
+Alliance Health at Braintree, 175 Grove St, Braintree, MA  
+Harrington House Rehab & Healthcare, 160 Main St, Walpole, MA  
+Bethany Healthcare Rest Home, 97 Bethany Rd, Framingham, MA  
+Alliance Health at Marie Esther, 720 Boston, Marlborough, MA  
+Shrewsbury Nursing & Rehab Center, 40 Julio Dr, Shrewsbury, MA 01545  
+Alliance Health at Doolittle Unit 1, 16 Bird St, Foxboro, MA  
+CareOne at Concord, 57 Old Rd to 9 Acre Corner, Concord, MA 01742  
+The Commons at Lincoln, 3 Harvest Cir, Lincoln, MA  
+Rivercrest Nursing and Wellness, 100 Newbury Ct, Concord, MA  
+Brookhaven at Lexington Independent Living, 1010 Waltham St, Lexington, MA  
+Woburn Rehabilitation & Nursing Center, 18 Frances St, Woburn, MA 01801  
+CareOne at Wilmington, 750 Woburn St, Wilmington, MA 01887  
+CareOne at Lexington, 178 Lowell St, Lexington, MA 02420  
+Winchester Rehabilitation and Nursing Center, 223 Swanton St, Winchester, MA 01890  
+Aberjona Rehabilitation & Nursing Center, 184 Swanton St, Winchester, MA 01890  
+The Commons in Lincoln, 1 Harvest Cir, Lincoln, MA 01773  
+CareOne at Essex Park, 265 Essex St, Beverly, MA 01915  
+CareOne at Peabody, 199 Andover St, Peabody, MA 01960  
+
+----------------------------------------------------
+STEP 6 — BILLING INFORMATION
+
+From Billing Information extract:
+
+Primary Insurance  
+Look for:
+Primary:
+Insurance:
+Primary Insurance:
+
+Sub/Member No.  
+Only if one of these labels exists:
+Sub/Member No.
+Subscriber ID
+Subscriber No.
+Member ID
+Member No.
+Mem #
+ID Number (insurance section only)
+
+Group Number  
+Only if one of these labels exists:
+Group Number
+Group #
+Grp #
+Group No.
+Group ID
+Group Code
+
+If a label does not exist → leave the field blank  
+Never copy values between these fields
+
+----------------------------------------------------
+STEP 7 — DIAGNOSIS CODES
+
+From the Symptoms or Diagnosis section:
+
+Extract ONLY ICD-10 codes (examples: E11.9, I50.9, J44.9)  
+Ignore all text descriptions  
+Remove duplicates  
+Return comma-separated  
+
+----------------------------------------------------
+FINAL OUTPUT FORMAT (EXACT — NO EXTRA TEXT)
+
+Barcode Image Present: YES
+Patient Name:
+DOB:
+Facility:
+Primary:
+Sub/Member No.:
+Group Number:
+Diagnosis Codes:"""
+
             inputs = [
                 {
                     "role": "user",
                     "content": [
                         {
                             "type": "text", 
-                            "text": "IMPORTANT: First check if this page contains a visible barcode/QR code image.\n\nBarcode Image Present: [YES or NO]\n\nIf NO barcode image is present, respond ONLY with 'Barcode Image Present: NO' and stop.\n\nIf YES barcode image is present, continue with extraction.\n\n---\n\nAlso check if this page contains 'DROP SHEET'.\n\nIf this is a DROP SHEET without a barcode, do NOT extract any data.\nIf this is a DROP SHEET with a barcode, continue to extract data.\n\n---\n\nExtract ONLY PRINTED/TYPED text. Skip all handwritten text completely.\n\n🚨 MANDATORY FIELDS ON EVERY BARCODE PAGE 🚨\n\n⚠️ Name of Patient and Patient Birthdate are REQUIRED:\n- EVERY barcode page HAS these two fields - they are MANDATORY\n- Look in the \"Patient Information\" section\n- Search for these label variations:\n  * Patient Name: \"Name:\", \"Patient:\", \"Patient Name:\", \"Name of Patient:\"\n  * Patient Birthdate: \"DOB:\", \"Date of Birth:\", \"Birthdate:\", \"Birth Date:\", \"D.O.B.:\"\n- If you don't find them, LOOK AGAIN - they are ALWAYS there on barcode pages\n\n---\n\n🚨 CRITICAL EXTRACTION RULES 🚨\n\n1. ❌ NEVER COPY VALUES BETWEEN FIELDS\n   - Each field has its own label - extract from the correct label only\n   - If Sub/Member No. is \"101338884000\" and Group Number label doesn't exist, DO NOT copy \"101338884000\" to Group Number\n   - Leave Group Number BLANK if its label is not found\n\n2. ❌ NEVER USE PLACEHOLDER TEXT\n   - If a field label is not found, leave it COMPLETELY BLANK\n   - DO NOT write: '[NOT FOUND]', 'N/A', '(not printed)', '[NOT PROVIDED]'\n   - Just leave it empty\n\n3. ✅ ONLY EXTRACT FROM THE CORRECT LABEL\n   - Each field must be extracted from its specific label only\n\n---\n\n*** SUB/MEMBER NO. vs GROUP NUMBER - COMPLETELY DIFFERENT FIELDS ***\n\n📋 Sub/Member No. - HOW TO EXTRACT:\n1. Look for these SPECIFIC labels:\n   • \"Sub/Member No.:\"\n   • \"Subscriber ID\" / \"Subscriber No.\"\n   • \"Member ID\" / \"Member No.\" / \"Mem #\"\n   • \"ID Number\" (in insurance section only)\n2. If you FIND the label → extract the value next to it\n3. If you DON'T FIND the label → leave Sub/Member No. BLANK\n\n🏢 Group Number - HOW TO EXTRACT:\n1. Look for these SPECIFIC labels (DIFFERENT from above):\n   • \"Group Number\"\n   • \"Group #\" / \"Grp #\" / \"Group No.\"\n   • \"Group ID\" / \"Group Code\"\n2. If you FIND the label → extract the value next to it\n3. If you DON'T FIND the label → leave Group Number BLANK\n\n⚠️ VALIDATION:\n❌ ERROR: Sub/Member No. and Group Number have the SAME value = YOU COPIED!\n✅ CORRECT: They are DIFFERENT or one is BLANK\n\nExamples:\n✅ Sub/Member No.: 8F23MW6MX09, Group Number: MCRMA (Different - Correct)\n✅ Sub/Member No.: 101338884000, Group Number: (Only found Member ID label - Correct)\n❌ Sub/Member No.: 101338884000, Group Number: 101338884000 (Same - ERROR!)\n\n---\n\nExtract these fields:\n1. Appt Date - Look for: \"Appt Date\", \"Appointment Date\", \"Collection Date\", \"Order Date\"\n2. Name of Patient (REQUIRED) - Always present on barcode pages\n3. Patient Birthdate (REQUIRED) - Always present on barcode pages\n4. Facility Information - Facility name AND address combined\n5. Primary Insurance - Look for: \"Primary:\", \"Insurance:\", \"Primary Insurance\"\n6. Sub/Member No. - Extract ONLY if its label exists, otherwise BLANK\n7. Group Number - Extract ONLY if its label exists, otherwise BLANK\n8. Diagnosis Codes - All ICD codes\n\nIMPORTANT FOR PATIENT NAME:\n- Copy EXACTLY as printed\n- Do NOT rearrange: 'LINDA BONARRIGO' stays 'LINDA BONARRIGO' (NOT 'BONARRIGO, LINDA')\n\nIMPORTANT FOR DIAGNOSIS CODES:\n- Extract all codes (E11.9, I50.9, I10, etc.)\n- List unique codes only: code1, code2, code3\n\nReturn in this EXACT format:\nBarcode Image Present: [YES or NO]\nAppt Date: [value or blank]\nName of Patient: [value - REQUIRED for barcode pages]\nPatient Birthdate: [value - REQUIRED for barcode pages]\nFacility Information: [value or blank]\nPrimary: [value or blank]\nSub/Member No.: [value only if label found, otherwise blank]\nGroup Number: [value only if label found, otherwise blank]\nDiagnosis Codes: [value or blank]\n\n🔍 FINAL CHECKLIST:\n✓ Did I find Name of Patient and Patient Birthdate? (REQUIRED for barcode pages)\n✓ Are Sub/Member No. and Group Number DIFFERENT? (If same = ERROR)\n✓ Did I extract each field from its correct label?\n✓ Did I leave fields blank if labels not found? (No placeholder text)"
+                            "text": prompt_text
                         },
                         {
                             "type": "image_url",
@@ -188,24 +336,21 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
                 continue
             
             lines = response_text.split('\n')
-            appt_date = ""
             patient_name = ""
-            patient_birthdate = ""
+            patient_dob = ""
             facility_info = ""
             insurance_company = ""
             mem_id = ""
-            group_mem_id = ""
+            group_number = ""
             diagnosis_codes = ""
             
             for line in lines:
-                if "Appt Date:" in line:
-                    appt_date = line.split("Appt Date:")[-1].strip().replace("*", "")
-                elif "Name of Patient:" in line:
-                    patient_name = line.split("Name of Patient:")[-1].strip().replace("*", "")
-                elif "Patient Birthdate:" in line:
-                    patient_birthdate = line.split("Patient Birthdate:")[-1].strip().replace("*", "")
-                elif "Facility Information:" in line:
-                    facility_info = line.split("Facility Information:")[-1].strip().replace("*", "")
+                if "Patient Name:" in line:
+                    patient_name = line.split("Patient Name:")[-1].strip().replace("*", "")
+                elif "DOB:" in line:
+                    patient_dob = line.split("DOB:")[-1].strip().replace("*", "")
+                elif "Facility:" in line:
+                    facility_info = line.split("Facility:")[-1].strip().replace("*", "")
                 elif "Primary:" in line:
                     extracted_primary = line.split("Primary:")[-1].strip().replace("*", "")
                     if extracted_primary and len(extracted_primary.strip()) > 0:
@@ -214,29 +359,18 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
                     extracted_member = line.split("Sub/Member No.:")[-1].strip().replace("*", "")
                     if extracted_member and len(extracted_member.strip()) > 0:
                         mem_id = extracted_member
-                elif "Group Number:" in line or "Group ID:" in line or "Grp #:" in line:
-                    if "Group Number:" in line:
-                        extracted_group = line.split("Group Number:")[-1].strip().replace("*", "")
-                    elif "Group ID:" in line:
-                        extracted_group = line.split("Group ID:")[-1].strip().replace("*", "")
-                    else:
-                        extracted_group = line.split("Grp #:")[-1].strip().replace("*", "")
-                    
-                    # Make sure it's not capturing address, Mem ID, Member ID, or other unwanted data
-                    exclude_words = ["address", "mem", "member", "sub", "insurance", "company", ","]
-                    should_exclude = any(word in extracted_group.lower() or extracted_group.find(word) != -1 for word in exclude_words)
-                    
-                    if extracted_group and len(extracted_group.strip()) > 0 and not should_exclude:
-                        group_mem_id = extracted_group
+                elif "Group Number:" in line:
+                    extracted_group = line.split("Group Number:")[-1].strip().replace("*", "")
+                    if extracted_group and len(extracted_group.strip()) > 0:
+                        group_number = extracted_group
                 elif "Diagnosis Codes:" in line:
                     extracted_codes = line.split("Diagnosis Codes:")[-1].strip().replace("*", "")
                     if extracted_codes and len(extracted_codes.strip()) > 0:
                         diagnosis_codes = extracted_codes
             
             has_any_data = (patient_name and len(patient_name.strip()) > 0) or \
-                          (patient_birthdate and len(patient_birthdate.strip()) > 0) or \
+                          (patient_dob and len(patient_dob.strip()) > 0) or \
                           (facility_info and len(facility_info.strip()) > 0) or \
-                          (appt_date and len(appt_date.strip()) > 0) or \
                           (insurance_company and len(insurance_company.strip()) > 0) or \
                           (mem_id and len(mem_id.strip()) > 0) or \
                           (diagnosis_codes and len(diagnosis_codes.strip()) > 0)
@@ -244,11 +378,10 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
             if has_any_data:
                 facility_final = match_facility(facility_info)
                 
-                formatted_appt_date = format_date_to_ddmmyyyy(appt_date)
-                formatted_birthdate = format_date_to_ddmmyyyy(patient_birthdate)
+                formatted_birthdate = format_date_to_ddmmyyyy(patient_dob)
                 
                 ws[f'A{row}'] = ""
-                ws[f'B{row}'] = formatted_appt_date if formatted_appt_date != prev_date else ""
+                ws[f'B{row}'] = ""
                 ws[f'C{row}'] = ""
                 ws[f'D{row}'] = ""
                 ws[f'E{row}'] = ""
@@ -270,10 +403,8 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
                 ws[f'U{row}'] = ""
                 ws[f'V{row}'] = insurance_company
                 ws[f'W{row}'] = mem_id
-                ws[f'X{row}'] = group_mem_id
+                ws[f'X{row}'] = group_number
                 
-                if formatted_appt_date:
-                    prev_date = formatted_appt_date
                 if facility_final:
                     prev_facility = facility_final
                 
@@ -284,13 +415,13 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
                 if not is_drop_sheet:
                     insurance_present = bool(insurance_company and insurance_company.strip())
                     mem_id_present = bool(mem_id and mem_id.strip())
-                    group_mem_id_present = bool(group_mem_id and group_mem_id.strip())
+                    group_number_present = bool(group_number and group_number.strip())
                     
                     if not insurance_present:
                         ws[f'V{row}'].fill = red_fill
                     if not mem_id_present:
                         ws[f'W{row}'].fill = red_fill
-                    if not group_mem_id_present:
+                    if not group_number_present:
                         ws[f'X{row}'].fill = red_fill
                 
                 row += 1
@@ -315,93 +446,36 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
                 os.unlink(pdf_path)
             except Exception as e:
                 pass
-def extract_unique_diagnosis_codes(text):
-    import re
-    
-    pattern = r'\b([A-Z0-9]+(?:\.[0-9]+)?)\b'
-    
-    matches = re.findall(pattern, text)
-    
-    codes = []
-    for match in matches:
-        if re.match(r'^[A-Z]\d+(?:\.\d+)?$', match) or re.match(r'^\d+(?:\.\d+)?$', match):
-            codes.append(match)
-    
-    seen = set()
-    unique_codes = []
-    for code in codes:
-        code_upper = code.upper()
-        if code_upper not in seen:
-            seen.add(code_upper)
-            unique_codes.append(code)
-    
-    return unique_codes
 
 
-st.set_page_config(page_title="PDF Data Extractor & Diagnosis Code Extractor", layout="centered")
-st.title("📄 PDF Data Extractor & 🏥 Diagnosis Code Extractor")
+st.set_page_config(page_title="PDF Data Extractor", layout="centered")
+st.title("📄 PDF Data Extractor")
 
-tab1, tab2 = st.tabs(["PDF Data Extractor", "Diagnosis Code Extractor"])
+uploaded_file = st.file_uploader("Upload PDF", type="pdf")
 
-with tab1:
-    uploaded_file = st.file_uploader("Upload PDF", type="pdf")
-
-    if uploaded_file is not None:
-        st.success(f"✅ File uploaded: {uploaded_file.name}")
+if uploaded_file is not None:
+    st.success(f"✅ File uploaded: {uploaded_file.name}")
+    
+    if st.button("🔄 Process PDF", use_container_width=True):
+        progress_bar = st.progress(0)
+        status_text = st.empty()
         
-        if st.button("🔄 Process PDF", use_container_width=True):
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+        try:
+            output_file = extract_from_pdf(uploaded_file, progress_bar, status_text)
             
-            try:
-                output_file = extract_from_pdf(uploaded_file, progress_bar, status_text)
-                
-                progress_bar.progress(1.0)
-                status_text.text("✅ Processing complete!")
-                
-                with open(output_file, "rb") as file:
-                    st.download_button(
-                        label="📥 Download Excel File",
-                        data=file,
-                        file_name=os.path.basename(output_file),
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
-                    )
-                
-                os.unlink(output_file)
+            progress_bar.progress(1.0)
+            status_text.text("✅ Processing complete!")
             
-            except Exception as e:
-                st.error(f"❌ Error: {str(e)}")
-
-with tab2:
-    st.header("Extract Unique Diagnosis Codes")
-    st.write("Paste unstructured medical text containing diagnosis codes. The tool will extract and deduplicate them.")
-    
-    medical_text = st.text_area(
-        "Paste medical text here:",
-        height=200,
-        placeholder="Example: Patient has E11.9 diabetes, 150.9 hypertension, and E11.9 type 2 diabetes..."
-    )
-    
-    if st.button("🔍 Extract Diagnosis Codes", use_container_width=True):
-        if medical_text.strip():
-            unique_codes = extract_unique_diagnosis_codes(medical_text)
+            with open(output_file, "rb") as file:
+                st.download_button(
+                    label="📥 Download Excel File",
+                    data=file,
+                    file_name=os.path.basename(output_file),
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
             
-            if unique_codes:
-                codes_output = ", ".join(unique_codes)
-                st.success("✅ Unique Diagnosis Codes:")
-                st.code(codes_output, language="text")
-                
-                st.write("**Result:**")
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    st.text_input("Codes:", value=codes_output, disabled=True)
-                with col2:
-                    st.write("")
-                    st.write("")
-                    if st.button("📋 Copy", use_container_width=True):
-                        st.write("Copied to clipboard!")
-            else:
-                st.warning("⚠️ No diagnosis codes found in the text.")
-        else:
-            st.warning("⚠️ Please enter some medical text.")
+            os.unlink(output_file)
+        
+        except Exception as e:
+            st.error(f"❌ Error: {str(e)}")
