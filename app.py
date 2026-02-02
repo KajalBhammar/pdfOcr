@@ -166,7 +166,7 @@ def extract_from_pdf(pdf_file, progress_bar, status_text):
             ]
             
             response = client.beta.conversations.start(
-                agent_id="ag_019c15660068744c849f5103340ffe25",
+                agent_id="ag_019bef914c89717aa9731bda4c9d23df",
                 inputs=inputs
             )
             
@@ -423,5 +423,6 @@ with tab2:
                 st.warning("⚠️ No diagnosis codes found in the text.")
         else:
             st.warning("⚠️ Please enter some medical text.")
+
 
 
