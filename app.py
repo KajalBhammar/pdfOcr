@@ -203,9 +203,14 @@ MANDATORY FIELDS (Must be extracted):
 CONDITIONALLY MANDATORY FIELDS (Extract if present):
 - "Patient Birthdate" - Patient's date of birth
 - "Patients ICD Code" - Medical diagnosis code (e.g., T81.49XD, Z23, etc.)
-- "Insurance Company" - Name of insurance provider
-- "Mem ID" - Member ID / Insurance ID number
-- "Group Mem ID" - Group Member ID
+- "Insurance Company" - Name of insurance provider (look for "Insurance:", "Ins:", "Payer:", "Insurance Company:")
+- "Mem ID" - Member ID number (look for "Member ID:", "Sub/Member No.:", "Subscriber ID:", "Member No:", "ID:", "Policy No:") - This is a NUMBER/ID, NOT an address!
+- "Group Mem ID" - Group Member ID (look for "Group ID:", "Group No:", "Group Member ID:")
+
+IMPORTANT FIELD DISTINCTIONS:
+- "Ins Address:" or "Insurance Address:" is the ADDRESS of the insurance company - DO NOT put this in Mem ID!
+- "Mem ID" should ONLY contain the member/subscriber ID NUMBER (alphanumeric like "3RW9K87UR58", "7RA2TG1JN99")
+- Do NOT confuse address fields with ID fields
 
 FIELDS TO LEAVE BLANK (Always ""):
 - Phleb, No of Patient, Patient ID, patient bod, From, To, Miles, To_2, Miles_2, To_3, Miles_3, To_4, Miles_4, To_5, Miles_5, Total Miles
