@@ -142,7 +142,7 @@ def match_facility(extracted_facility):
     # No match found - return empty string
     return ""
 
-def call_with_retry(api_func, max_retries=5, initial_delay=5):
+def call_with_retry(api_func, max_retries=3, initial_delay=2):
     """Call API function with exponential backoff retry on rate limit errors"""
     delay = initial_delay
     for attempt in range(max_retries):
@@ -150,124 +150,166 @@ def call_with_retry(api_func, max_retries=5, initial_delay=5):
             return api_func()
         except Exception as e:
             error_str = str(e)
-            # Check if it's a rate limit error (429)
             if "429" in error_str or "rate_limit" in error_str.lower() or "rate limit" in error_str.lower():
                 if attempt < max_retries - 1:
-                    st.warning(f"⏳ Rate limit hit. Waiting {delay} seconds before retry ({attempt + 1}/{max_retries})...")
+                    st.warning(f"⏳ Rate limit hit. Waiting {delay}s... ({attempt + 1}/{max_retries})")
                     time.sleep(delay)
-                    delay *= 2  # Exponential backoff
+                    delay *= 2
                 else:
-                    raise Exception(f"Rate limit exceeded after {max_retries} retries. Please try again later or use a smaller PDF.")
+                    raise
             else:
                 raise e
 
-def split_pdf_to_images(pdf_content):
-    """Convert PDF pages to individual images for batch processing"""
-    import fitz  # PyMuPDF
-    from io import BytesIO
+def split_pdf_to_chunks(pdf_content, pages_per_chunk=10):
+    """Split PDF into chunks of pages and return as separate base64 PDFs"""
+    import fitz
     
     pdf_document = fitz.open(stream=pdf_content, filetype="pdf")
-    page_images = []
+    total_pages = len(pdf_document)
+    chunks = []
     
-    for page_num in range(len(pdf_document)):
-        page = pdf_document.load_page(page_num)
-        # Render page to image (150 DPI for good quality without being too large)
-        mat = fitz.Matrix(150/72, 150/72)
-        pix = page.get_pixmap(matrix=mat)
-        img_bytes = pix.tobytes("png")
-        page_images.append(base64.b64encode(img_bytes).decode('utf-8'))
+    for start_page in range(0, total_pages, pages_per_chunk):
+        end_page = min(start_page + pages_per_chunk, total_pages)
+        
+        chunk_pdf = fitz.open()
+        chunk_pdf.insert_pdf(pdf_document, from_page=start_page, to_page=end_page - 1)
+        
+        chunk_bytes = chunk_pdf.tobytes()
+        chunk_base64 = base64.b64encode(chunk_bytes).decode('utf-8')
+        
+        chunks.append({
+            'base64': chunk_base64,
+            'start_page': start_page + 1,
+            'end_page': end_page,
+            'total_pages': total_pages
+        })
+        chunk_pdf.close()
     
     pdf_document.close()
-    return page_images
+    return chunks
+
+def extract_records_from_text(text_content):
+    """Extract patient records from OCR text using chat completion"""
+    
+    extraction_prompt = """You are a medical document data extraction specialist. Extract ALL patient records from this content.
+
+RECORD TYPES:
+1. "type": "dropsheet" - Handwritten dropsheet/signature page (set all other fields to "")
+2. "type": "patient" - Patient data records
+
+FIELDS TO EXTRACT FOR PATIENT RECORDS:
+- "Date" - Date of service/visit
+- "Name of Patient" - Full name
+- "Facility Information" - Facility name, room, address, phone
+- "Patient Birthdate" - DOB if present
+- "Patients ICD Code" - Diagnosis codes (e.g., T81.49XD, Z23)
+- "Insurance Company" - Insurance provider name
+- "Mem ID" - Member ID NUMBER only (alphanumeric like "3RW9K87UR58") - NOT an address!
+- "Group Mem ID" - Group Member ID
+
+LEAVE BLANK: Phleb, No of Patient, Patient ID, patient bod, From, To, Miles, To_2-5, Miles_2-5, Total Miles
+
+RULES: Copy values EXACTLY. Return records in order. NEVER fabricate data."""
+    
+    def chat_call():
+        return client.chat.complete(
+            model="mistral-large-latest",
+            messages=[{"role": "user", "content": f"{extraction_prompt}\n\n{text_content}"}],
+            response_format=ResponseFormat(
+                type="json_schema",
+                json_schema=JSONSchema(
+                    name="response_schema",
+                    schema_definition={
+                        "type": "object",
+                        "properties": {
+                            "records": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": {"type": "string", "enum": ["dropsheet", "patient"]},
+                                        "Phleb": {"type": "string", "default": ""},
+                                        "Date": {"type": "string"},
+                                        "No of Patient": {"type": "string", "default": ""},
+                                        "Patient ID": {"type": "string", "default": ""},
+                                        "patient bod": {"type": "string", "default": ""},
+                                        "Name of Patient": {"type": "string"},
+                                        "Patient Birthdate": {"type": "string"},
+                                        "Facility Information": {"type": "string"},
+                                        "Patients ICD Code": {"type": "string"},
+                                        "From": {"type": "string", "default": ""},
+                                        "To": {"type": "string", "default": ""},
+                                        "Miles": {"type": "string", "default": ""},
+                                        "To_2": {"type": "string", "default": ""},
+                                        "Miles_2": {"type": "string", "default": ""},
+                                        "To_3": {"type": "string", "default": ""},
+                                        "Miles_3": {"type": "string", "default": ""},
+                                        "To_4": {"type": "string", "default": ""},
+                                        "Miles_4": {"type": "string", "default": ""},
+                                        "To_5": {"type": "string", "default": ""},
+                                        "Miles_5": {"type": "string", "default": ""},
+                                        "Total Miles": {"type": "string", "default": ""},
+                                        "Insurance Company": {"type": "string"},
+                                        "Mem ID": {"type": "string"},
+                                        "Group Mem ID": {"type": "string"}
+                                    },
+                                    "required": ["type"]
+                                }
+                            }
+                        },
+                        "required": ["records"]
+                    },
+                ),
+            ),
+        )
+    
+    chat_response = call_with_retry(chat_call)
+    extracted_data = json.loads(chat_response.choices[0].message.content)
+    return extracted_data.get("records", [])
 
 def process_pdf(pdf_file, progress_callback=None):
-    """Process PDF using Mistral OCR API with batch processing for large files"""
+    """Process PDF in chunks of 10 pages to avoid rate limits"""
     try:
-        # Update progress
         if progress_callback:
-            progress_callback(5, "Reading PDF file...")
+            progress_callback(2, "Reading PDF file...")
         
-        # Read the file content
         pdf_content = pdf_file.read()
-        pdf_size_mb = len(pdf_content) / (1024 * 1024)
         
-        # Check if PDF is large (> 5MB or many pages)
-        # For large PDFs, use page-by-page processing
         try:
             import fitz
-            pdf_doc = fitz.open(stream=pdf_content, filetype="pdf")
-            num_pages = len(pdf_doc)
-            pdf_doc.close()
         except ImportError:
-            # If PyMuPDF not available, estimate pages from size
-            num_pages = max(1, int(pdf_size_mb * 10))  # Rough estimate
+            st.error("Please install PyMuPDF: pip install pymupdf")
+            return None
+        
+        # Get page count
+        pdf_doc = fitz.open(stream=pdf_content, filetype="pdf")
+        num_pages = len(pdf_doc)
+        pdf_doc.close()
         
         if progress_callback:
-            progress_callback(10, f"Detected {num_pages} pages...")
+            progress_callback(5, f"Splitting {num_pages} pages into chunks of 10...")
         
-        all_text = ""
+        # Split PDF into chunks
+        chunks = split_pdf_to_chunks(pdf_content, pages_per_chunk=10)
+        total_chunks = len(chunks)
         
-        # For large PDFs (>30 pages), process in batches
-        if num_pages > 30:
-            try:
-                import fitz
-                page_images = split_pdf_to_images(pdf_content)
-                
-                # Process in batches of 10 pages
-                batch_size = 10
-                total_batches = (len(page_images) + batch_size - 1) // batch_size
-                
-                for batch_idx in range(total_batches):
-                    start_idx = batch_idx * batch_size
-                    end_idx = min(start_idx + batch_size, len(page_images))
-                    batch_images = page_images[start_idx:end_idx]
-                    
-                    progress_pct = 10 + int((batch_idx / total_batches) * 35)
-                    if progress_callback:
-                        progress_callback(progress_pct, f"Processing pages {start_idx + 1}-{end_idx} of {num_pages}...")
-                    
-                    # Process each page in the batch
-                    for i, img_base64 in enumerate(batch_images):
-                        page_num = start_idx + i + 1
-                        
-                        def ocr_call():
-                            return client.ocr.process(
-                                document={
-                                    "type": "image_url",
-                                    "image_url": f"data:image/png;base64,{img_base64}"
-                                },
-                                model="mistral-ocr-latest",
-                                include_image_base64=False,
-                            )
-                        
-                        ocr_response = call_with_retry(ocr_call)
-                        
-                        for page in ocr_response.pages:
-                            all_text += f"\n--- Page {page_num} ---\n"
-                            all_text += page.markdown + "\n"
-                        
-                        # Small delay between pages to avoid rate limits
-                        time.sleep(0.5)
-                    
-                    # Longer delay between batches
-                    if batch_idx < total_batches - 1:
-                        time.sleep(2)
-                
-            except ImportError:
-                st.error("For large PDFs (>30 pages), please install PyMuPDF: pip install pymupdf")
-                return None
-        else:
-            # For smaller PDFs, use the original single-request method with retry
+        all_records = []
+        
+        for chunk_idx, chunk in enumerate(chunks):
+            chunk_start = chunk['start_page']
+            chunk_end = chunk['end_page']
+            
+            # Progress calculation
+            progress_pct = 5 + int(((chunk_idx + 0.3) / total_chunks) * 85)
             if progress_callback:
-                progress_callback(15, "Running OCR on document...")
+                progress_callback(progress_pct, f"OCR: Pages {chunk_start}-{chunk_end} of {num_pages}...")
             
-            base64_file = base64.b64encode(pdf_content).decode('utf-8')
-            
+            # OCR this chunk
             def ocr_call():
                 return client.ocr.process(
                     document={
                         "type": "document_url",
-                        "document_url": f"data:application/pdf;base64,{base64_file}"
+                        "document_url": f"data:application/pdf;base64,{chunk['base64']}"
                     },
                     model="mistral-ocr-latest",
                     include_image_base64=False,
@@ -275,131 +317,35 @@ def process_pdf(pdf_file, progress_callback=None):
             
             ocr_response = call_with_retry(ocr_call)
             
-            if progress_callback:
-                progress_callback(40, "Extracting text from pages...")
+            # Combine OCR text
+            chunk_text = ""
+            for page_idx, page in enumerate(ocr_response.pages):
+                chunk_text += f"\n--- Page {chunk_start + page_idx} ---\n{page.markdown}\n"
             
-            for page in ocr_response.pages:
-                all_text += page.markdown + "\n"
+            time.sleep(1)  # Brief delay after OCR
+            
+            progress_pct = 5 + int(((chunk_idx + 0.7) / total_chunks) * 85)
+            if progress_callback:
+                progress_callback(progress_pct, f"Extracting: Pages {chunk_start}-{chunk_end}...")
+            
+            # Extract records from chunk
+            chunk_records = extract_records_from_text(chunk_text)
+            all_records.extend(chunk_records)
+            
+            if progress_callback:
+                progress_callback(
+                    5 + int(((chunk_idx + 1) / total_chunks) * 85),
+                    f"Done pages {chunk_start}-{chunk_end} ({len(chunk_records)} records)"
+                )
+            
+            # Delay between chunks
+            if chunk_idx < total_chunks - 1:
+                time.sleep(2)
         
-        # Update progress
         if progress_callback:
-            progress_callback(50, "Analyzing document with AI...")
+            progress_callback(95, f"Finalizing... Total: {len(all_records)} records")
         
-        # Step 2: Use chat completion to extract structured data
-        extraction_prompt = """You are a medical document data extraction specialist. This PDF may contain multiple patient records and dropsheet pages.
-
-DOCUMENT STRUCTURE:
-- A "DROPSHEET" is a handwritten page with nurse names, patient lists, or signature sheets - it marks the START of a new section
-- After each dropsheet, there are multiple patient report pages
-
-YOUR TASK:
-Extract ALL patient records from the document and return them as a JSON array. For each record, identify if it's a DROPSHEET marker or a PATIENT record.
-
-RECORD TYPES:
-1. "type": "dropsheet" - When you detect a handwritten dropsheet/signature page (set all other fields to empty "")
-2. "type": "patient" - For actual patient data records
-
-FIELDS TO EXTRACT FOR PATIENT RECORDS:
-
-MANDATORY FIELDS (Must be extracted):
-- "Date" - The date of service/visit
-- "Name of Patient" - Full name of the patient
-- "Facility Information" - Complete facility details including name, room number, full address, and phone number
-
-CONDITIONALLY MANDATORY FIELDS (Extract if present):
-- "Patient Birthdate" - Patient's date of birth
-- "Patients ICD Code" - Medical diagnosis code (e.g., T81.49XD, Z23, etc.)
-- "Insurance Company" - Name of insurance provider (look for "Insurance:", "Ins:", "Payer:", "Insurance Company:")
-- "Mem ID" - Member ID number (look for "Member ID:", "Sub/Member No.:", "Subscriber ID:", "Member No:", "ID:", "Policy No:") - This is a NUMBER/ID, NOT an address!
-- "Group Mem ID" - Group Member ID (look for "Group ID:", "Group No:", "Group Member ID:")
-
-IMPORTANT FIELD DISTINCTIONS:
-- "Ins Address:" or "Insurance Address:" is the ADDRESS of the insurance company - DO NOT put this in Mem ID!
-- "Mem ID" should ONLY contain the member/subscriber ID NUMBER (alphanumeric like "3RW9K87UR58", "7RA2TG1JN99")
-- Do NOT confuse address fields with ID fields
-
-FIELDS TO LEAVE BLANK (Always ""):
-- Phleb, No of Patient, Patient ID, patient bod, From, To, Miles, To_2, Miles_2, To_3, Miles_3, To_4, Miles_4, To_5, Miles_5, Total Miles
-
-EXTRACTION RULES:
-- Copy values EXACTLY as they appear
-- Return an ARRAY of records in the order they appear in the document
-- Insert a dropsheet record when you detect handwritten pages with nurse names/signatures
-- NEVER guess or fabricate data
-
-Return a JSON array like: [{"type": "dropsheet", ...}, {"type": "patient", ...}, {"type": "patient", ...}, {"type": "dropsheet", ...}, ...]"""
-        
-        def chat_call():
-            return client.chat.complete(
-                model="mistral-large-latest",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": f"{extraction_prompt}\n\n--- DOCUMENT CONTENT ---\n{all_text}\n--- END OF DOCUMENT ---"
-                    }
-                ],
-                response_format=ResponseFormat(
-                    type="json_schema",
-                    json_schema=JSONSchema(
-                        name="response_schema",
-                        schema_definition={
-                            "type": "object",
-                            "properties": {
-                                "records": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "type": {"type": "string", "enum": ["dropsheet", "patient"]},
-                                            "Phleb": {"type": "string", "default": ""},
-                                            "Date": {"type": "string"},
-                                            "No of Patient": {"type": "string", "default": ""},
-                                            "Patient ID": {"type": "string", "default": ""},
-                                            "patient bod": {"type": "string", "default": ""},
-                                            "Name of Patient": {"type": "string"},
-                                            "Patient Birthdate": {"type": "string"},
-                                            "Facility Information": {"type": "string"},
-                                            "Patients ICD Code": {"type": "string"},
-                                            "From": {"type": "string", "default": ""},
-                                            "To": {"type": "string", "default": ""},
-                                            "Miles": {"type": "string", "default": ""},
-                                            "To_2": {"type": "string", "default": ""},
-                                            "Miles_2": {"type": "string", "default": ""},
-                                            "To_3": {"type": "string", "default": ""},
-                                            "Miles_3": {"type": "string", "default": ""},
-                                            "To_4": {"type": "string", "default": ""},
-                                            "Miles_4": {"type": "string", "default": ""},
-                                            "To_5": {"type": "string", "default": ""},
-                                            "Miles_5": {"type": "string", "default": ""},
-                                            "Total Miles": {"type": "string", "default": ""},
-                                            "Insurance Company": {"type": "string"},
-                                            "Mem ID": {"type": "string"},
-                                            "Group Mem ID": {"type": "string"}
-                                        },
-                                        "required": ["type"]
-                                    }
-                                }
-                            },
-                            "required": ["records"]
-                        },
-                    ),
-                ),
-            )
-        
-        chat_response = call_with_retry(chat_call)
-        
-        # Update progress
-        if progress_callback:
-            progress_callback(85, "Parsing extracted data...")
-        
-        # Parse the JSON response
-        extracted_data = json.loads(chat_response.choices[0].message.content)
-        
-        # Update progress
-        if progress_callback:
-            progress_callback(95, "Finalizing...")
-        
-        return extracted_data.get("records", [])
+        return all_records
     
     except Exception as e:
         st.error(f"Error processing PDF: {str(e)}")
