@@ -142,7 +142,7 @@ def match_facility(extracted_facility):
     # No match found - return empty string
     return ""
 
-def call_with_retry(api_func, max_retries=3, initial_delay=2):
+def call_with_retry(api_func, max_retries=3, initial_delay=0.5):
     """Call API function with exponential backoff retry on rate limit errors"""
     delay = initial_delay
     for attempt in range(max_retries):
@@ -160,7 +160,7 @@ def call_with_retry(api_func, max_retries=3, initial_delay=2):
             else:
                 raise e
 
-def split_pdf_to_chunks(pdf_content, pages_per_chunk=10):
+def split_pdf_to_chunks(pdf_content, pages_per_chunk=20):
     """Split PDF into chunks of pages and return as separate base64 PDFs"""
     import fitz
     
@@ -268,7 +268,7 @@ RULES: Copy values EXACTLY. Return records in order. NEVER fabricate data."""
     return extracted_data.get("records", [])
 
 def process_pdf(pdf_file, progress_callback=None):
-    """Process PDF in chunks of 10 pages to avoid rate limits"""
+    """Process PDF in chunks of 20 pages for speed"""
     try:
         if progress_callback:
             progress_callback(2, "Reading PDF file...")
@@ -287,10 +287,10 @@ def process_pdf(pdf_file, progress_callback=None):
         pdf_doc.close()
         
         if progress_callback:
-            progress_callback(5, f"Splitting {num_pages} pages into chunks of 10...")
+            progress_callback(5, f"Splitting {num_pages} pages into chunks of 20...")
         
-        # Split PDF into chunks
-        chunks = split_pdf_to_chunks(pdf_content, pages_per_chunk=10)
+        # Split PDF into chunks - use 20 pages per chunk for speed
+        chunks = split_pdf_to_chunks(pdf_content, pages_per_chunk=20)
         total_chunks = len(chunks)
         
         all_records = []
@@ -322,8 +322,6 @@ def process_pdf(pdf_file, progress_callback=None):
             for page_idx, page in enumerate(ocr_response.pages):
                 chunk_text += f"\n--- Page {chunk_start + page_idx} ---\n{page.markdown}\n"
             
-            time.sleep(1)  # Brief delay after OCR
-            
             progress_pct = 5 + int(((chunk_idx + 0.7) / total_chunks) * 85)
             if progress_callback:
                 progress_callback(progress_pct, f"Extracting: Pages {chunk_start}-{chunk_end}...")
@@ -338,9 +336,9 @@ def process_pdf(pdf_file, progress_callback=None):
                     f"Done pages {chunk_start}-{chunk_end} ({len(chunk_records)} records)"
                 )
             
-            # Delay between chunks
+            # Minimal delay between chunks to avoid rate limits
             if chunk_idx < total_chunks - 1:
-                time.sleep(2)
+                time.sleep(0.3)
         
         if progress_callback:
             progress_callback(95, f"Finalizing... Total: {len(all_records)} records")
@@ -572,7 +570,7 @@ if uploaded_file:
                 # Show 100% complete briefly
                 elapsed = time.time() - start_time
                 progress_container.progress(1.0, text=f"✅ 100% complete - Done! (Total: {int(elapsed)}s)")
-                time.sleep(1)
+                time.sleep(0.3)
                 
                 # Clear progress and show success
                 progress_container.empty()
