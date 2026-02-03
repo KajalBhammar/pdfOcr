@@ -9,8 +9,6 @@ from mistralai import Mistral, JSONSchema, ResponseFormat
 from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
 
 # Initialize Mistral client
 api_key = os.environ.get("MISTRAL_API_KEY")
@@ -144,7 +142,7 @@ def match_facility(extracted_facility):
     # No match found - return empty string
     return ""
 
-def call_with_retry(api_func, max_retries=3, initial_delay=1):
+def call_with_retry(api_func, max_retries=5, initial_delay=3):
     """Call API function with exponential backoff retry on rate limit errors"""
     delay = initial_delay
     for attempt in range(max_retries):
@@ -155,13 +153,13 @@ def call_with_retry(api_func, max_retries=3, initial_delay=1):
             if "429" in error_str or "rate_limit" in error_str.lower() or "rate limit" in error_str.lower():
                 if attempt < max_retries - 1:
                     time.sleep(delay)
-                    delay *= 2
+                    delay = min(delay * 2, 30)  # Cap at 30 seconds
                 else:
                     raise
             else:
                 raise e
 
-def split_pdf_to_chunks(pdf_content, pages_per_chunk=20):
+def split_pdf_to_chunks(pdf_content, pages_per_chunk=30):
     """Split PDF into chunks of pages and return as separate base64 PDFs"""
     import fitz
     
@@ -190,116 +188,8 @@ def split_pdf_to_chunks(pdf_content, pages_per_chunk=20):
     pdf_document.close()
     return chunks
 
-def process_single_chunk(chunk, client):
-    """Process a single chunk: OCR + extraction (runs in thread)"""
-    chunk_start = chunk['start_page']
-    chunk_end = chunk['end_page']
-    chunk_idx = chunk['chunk_idx']
-    
-    # OCR this chunk
-    def ocr_call():
-        return client.ocr.process(
-            document={
-                "type": "document_url",
-                "document_url": f"data:application/pdf;base64,{chunk['base64']}"
-            },
-            model="mistral-ocr-latest",
-            include_image_base64=False,
-        )
-    
-    ocr_response = call_with_retry(ocr_call)
-    
-    # Combine OCR text
-    chunk_text = ""
-    for page_idx, page in enumerate(ocr_response.pages):
-        chunk_text += f"\n--- Page {chunk_start + page_idx} ---\n{page.markdown}\n"
-    
-    # Extract records
-    extraction_prompt = """Extract ALL patient records from this content as JSON.
-
-RECORD TYPES:
-1. "type": "dropsheet" - Handwritten dropsheet/signature page (set all other fields to "")
-2. "type": "patient" - Patient data records
-
-FIELDS FOR PATIENT RECORDS:
-- "Date" - Date of service
-- "Name of Patient" - Full name
-- "Facility Information" - Facility name, room, address, phone
-- "Patient Birthdate" - DOB if present
-- "Patients ICD Code" - Diagnosis codes (e.g., T81.49XD, Z23)
-- "Insurance Company" - Insurance provider name
-- "Mem ID" - Member ID NUMBER only (NOT an address!)
-- "Group Mem ID" - Group Member ID
-
-LEAVE BLANK: Phleb, No of Patient, Patient ID, patient bod, From, To, Miles, To_2-5, Miles_2-5, Total Miles
-
-Copy values EXACTLY. Return records in order. NEVER fabricate data."""
-    
-    def chat_call():
-        return client.chat.complete(
-            model="mistral-large-latest",
-            messages=[{"role": "user", "content": f"{extraction_prompt}\n\n{chunk_text}"}],
-            response_format=ResponseFormat(
-                type="json_schema",
-                json_schema=JSONSchema(
-                    name="response_schema",
-                    schema_definition={
-                        "type": "object",
-                        "properties": {
-                            "records": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "type": {"type": "string", "enum": ["dropsheet", "patient"]},
-                                        "Phleb": {"type": "string", "default": ""},
-                                        "Date": {"type": "string"},
-                                        "No of Patient": {"type": "string", "default": ""},
-                                        "Patient ID": {"type": "string", "default": ""},
-                                        "patient bod": {"type": "string", "default": ""},
-                                        "Name of Patient": {"type": "string"},
-                                        "Patient Birthdate": {"type": "string"},
-                                        "Facility Information": {"type": "string"},
-                                        "Patients ICD Code": {"type": "string"},
-                                        "From": {"type": "string", "default": ""},
-                                        "To": {"type": "string", "default": ""},
-                                        "Miles": {"type": "string", "default": ""},
-                                        "To_2": {"type": "string", "default": ""},
-                                        "Miles_2": {"type": "string", "default": ""},
-                                        "To_3": {"type": "string", "default": ""},
-                                        "Miles_3": {"type": "string", "default": ""},
-                                        "To_4": {"type": "string", "default": ""},
-                                        "Miles_4": {"type": "string", "default": ""},
-                                        "To_5": {"type": "string", "default": ""},
-                                        "Miles_5": {"type": "string", "default": ""},
-                                        "Total Miles": {"type": "string", "default": ""},
-                                        "Insurance Company": {"type": "string"},
-                                        "Mem ID": {"type": "string"},
-                                        "Group Mem ID": {"type": "string"}
-                                    },
-                                    "required": ["type"]
-                                }
-                            }
-                        },
-                        "required": ["records"]
-                    },
-                ),
-            ),
-        )
-    
-    chat_response = call_with_retry(chat_call)
-    extracted_data = json.loads(chat_response.choices[0].message.content)
-    records = extracted_data.get("records", [])
-    
-    return {
-        'chunk_idx': chunk_idx,
-        'start_page': chunk_start,
-        'end_page': chunk_end,
-        'records': records
-    }
-
 def process_pdf(pdf_file, progress_callback=None):
-    """Process PDF with parallel chunk processing for speed"""
+    """Process PDF in sequential chunks - reliable and fast"""
     try:
         if progress_callback:
             progress_callback(2, "Reading PDF file...")
@@ -318,57 +208,129 @@ def process_pdf(pdf_file, progress_callback=None):
         pdf_doc.close()
         
         if progress_callback:
-            progress_callback(5, f"Splitting {num_pages} pages into chunks...")
+            progress_callback(5, f"Processing {num_pages} pages...")
         
-        # Split PDF into chunks of 20 pages (larger chunks = fewer API calls)
-        chunks = split_pdf_to_chunks(pdf_content, pages_per_chunk=20)
+        # Split PDF into chunks of 30 pages (larger = fewer API calls = faster)
+        chunks = split_pdf_to_chunks(pdf_content, pages_per_chunk=30)
         total_chunks = len(chunks)
         
-        if progress_callback:
-            progress_callback(10, f"Processing {total_chunks} chunks in parallel...")
-        
-        # Process chunks in parallel (max 3 concurrent to avoid rate limits)
-        completed_chunks = {}
-        completed_count = 0
-        lock = threading.Lock()
-        
-        def process_with_tracking(chunk):
-            nonlocal completed_count
-            result = process_single_chunk(chunk, client)
-            with lock:
-                completed_count += 1
-                if progress_callback:
-                    pct = 10 + int((completed_count / total_chunks) * 80)
-                    progress_callback(pct, f"Completed chunk {completed_count}/{total_chunks} (pages {result['start_page']}-{result['end_page']})")
-            return result
-        
-        # Use ThreadPoolExecutor for parallel processing
-        max_workers = min(3, total_chunks)  # Max 3 parallel to avoid rate limits
-        
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(process_with_tracking, chunk): chunk['chunk_idx'] for chunk in chunks}
-            
-            for future in as_completed(futures):
-                try:
-                    result = future.result()
-                    completed_chunks[result['chunk_idx']] = result['records']
-                except Exception as e:
-                    st.warning(f"Chunk failed, retrying... Error: {str(e)[:50]}")
-                    # Retry the failed chunk
-                    chunk_idx = futures[future]
-                    chunk = chunks[chunk_idx]
-                    time.sleep(2)
-                    try:
-                        result = process_single_chunk(chunk, client)
-                        completed_chunks[result['chunk_idx']] = result['records']
-                    except:
-                        completed_chunks[chunk_idx] = []  # Skip failed chunk
-        
-        # Combine records in correct order
         all_records = []
-        for i in range(total_chunks):
-            if i in completed_chunks:
-                all_records.extend(completed_chunks[i])
+        
+        for chunk_idx, chunk in enumerate(chunks):
+            chunk_start = chunk['start_page']
+            chunk_end = chunk['end_page']
+            
+            # Progress for OCR phase
+            progress_pct = 5 + int(((chunk_idx + 0.3) / total_chunks) * 90)
+            if progress_callback:
+                progress_callback(progress_pct, f"OCR: Pages {chunk_start}-{chunk_end} of {num_pages}...")
+            
+            # OCR this chunk
+            def ocr_call():
+                return client.ocr.process(
+                    document={
+                        "type": "document_url",
+                        "document_url": f"data:application/pdf;base64,{chunk['base64']}"
+                    },
+                    model="mistral-ocr-latest",
+                    include_image_base64=False,
+                )
+            
+            ocr_response = call_with_retry(ocr_call)
+            
+            # Combine OCR text
+            chunk_text = ""
+            for page_idx, page in enumerate(ocr_response.pages):
+                chunk_text += f"\n--- Page {chunk_start + page_idx} ---\n{page.markdown}\n"
+            
+            # Progress for extraction phase
+            progress_pct = 5 + int(((chunk_idx + 0.7) / total_chunks) * 90)
+            if progress_callback:
+                progress_callback(progress_pct, f"Extracting: Pages {chunk_start}-{chunk_end}...")
+            
+            # Extract records
+            extraction_prompt = """Extract ALL patient records from this content as JSON.
+
+RECORD TYPES:
+1. "type": "dropsheet" - Handwritten dropsheet/signature page (set all other fields to "")
+2. "type": "patient" - Patient data records
+
+FIELDS FOR PATIENT RECORDS:
+- "Date" - Date of service
+- "Name of Patient" - Full name
+- "Facility Information" - Facility name, room, address, phone
+- "Patient Birthdate" - DOB if present
+- "Patients ICD Code" - Diagnosis codes (e.g., T81.49XD, Z23)
+- "Insurance Company" - Insurance provider name
+- "Mem ID" - Member ID NUMBER only (NOT an address!)
+- "Group Mem ID" - Group Member ID
+
+LEAVE BLANK: Phleb, No of Patient, Patient ID, patient bod, From, To, Miles, To_2-5, Miles_2-5, Total Miles
+
+Copy values EXACTLY. Return records in order. NEVER fabricate data."""
+            
+            def chat_call():
+                return client.chat.complete(
+                    model="mistral-large-latest",
+                    messages=[{"role": "user", "content": f"{extraction_prompt}\n\n{chunk_text}"}],
+                    response_format=ResponseFormat(
+                        type="json_schema",
+                        json_schema=JSONSchema(
+                            name="response_schema",
+                            schema_definition={
+                                "type": "object",
+                                "properties": {
+                                    "records": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "type": {"type": "string", "enum": ["dropsheet", "patient"]},
+                                                "Phleb": {"type": "string", "default": ""},
+                                                "Date": {"type": "string"},
+                                                "No of Patient": {"type": "string", "default": ""},
+                                                "Patient ID": {"type": "string", "default": ""},
+                                                "patient bod": {"type": "string", "default": ""},
+                                                "Name of Patient": {"type": "string"},
+                                                "Patient Birthdate": {"type": "string"},
+                                                "Facility Information": {"type": "string"},
+                                                "Patients ICD Code": {"type": "string"},
+                                                "From": {"type": "string", "default": ""},
+                                                "To": {"type": "string", "default": ""},
+                                                "Miles": {"type": "string", "default": ""},
+                                                "To_2": {"type": "string", "default": ""},
+                                                "Miles_2": {"type": "string", "default": ""},
+                                                "To_3": {"type": "string", "default": ""},
+                                                "Miles_3": {"type": "string", "default": ""},
+                                                "To_4": {"type": "string", "default": ""},
+                                                "Miles_4": {"type": "string", "default": ""},
+                                                "To_5": {"type": "string", "default": ""},
+                                                "Miles_5": {"type": "string", "default": ""},
+                                                "Total Miles": {"type": "string", "default": ""},
+                                                "Insurance Company": {"type": "string"},
+                                                "Mem ID": {"type": "string"},
+                                                "Group Mem ID": {"type": "string"}
+                                            },
+                                            "required": ["type"]
+                                        }
+                                    }
+                                },
+                                "required": ["records"]
+                            },
+                        ),
+                    ),
+                )
+            
+            chat_response = call_with_retry(chat_call)
+            extracted_data = json.loads(chat_response.choices[0].message.content)
+            chunk_records = extracted_data.get("records", [])
+            all_records.extend(chunk_records)
+            
+            if progress_callback:
+                progress_callback(
+                    5 + int(((chunk_idx + 1) / total_chunks) * 90),
+                    f"Done pages {chunk_start}-{chunk_end} ({len(chunk_records)} records)"
+                )
         
         if progress_callback:
             progress_callback(95, f"Finalizing... Total: {len(all_records)} records")
