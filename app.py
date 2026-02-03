@@ -9,8 +9,6 @@ from mistralai import Mistral, JSONSchema, ResponseFormat
 from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
 
 # Initialize Mistral client
 api_key = os.environ.get("MISTRAL_API_KEY")
@@ -144,27 +142,39 @@ def match_facility(extracted_facility):
     # No match found - return empty string
     return ""
 
-def call_with_retry(api_func, max_retries=5, initial_delay=1):
-    """Call API function with exponential backoff retry on rate limit and server errors"""
+def call_with_retry(api_func, max_retries=7, initial_delay=2):
+    """Call API function with exponential backoff retry - NEVER gives up easily"""
     delay = initial_delay
+    last_error = None
+    
     for attempt in range(max_retries):
         try:
-            return api_func()
+            result = api_func()
+            return result
         except Exception as e:
-            error_str = str(e)
-            is_rate_limit = "429" in error_str or "rate_limit" in error_str.lower() or "rate limit" in error_str.lower()
-            is_server_error = "500" in error_str or "502" in error_str or "503" in error_str or "internal_server_error" in error_str.lower() or "service unavailable" in error_str.lower()
+            last_error = e
+            error_str = str(e).lower()
             
-            if is_rate_limit or is_server_error:
-                if attempt < max_retries - 1:
-                    error_type = "Rate limit" if is_rate_limit else "Server error"
-                    print(f"⏳ {error_type} hit. Waiting {delay}s... ({attempt + 1}/{max_retries})")
-                    time.sleep(delay)
-                    delay = min(delay * 2, 30)  # Cap at 30 seconds
-                else:
-                    raise
+            # Check if it's a retryable error
+            is_retryable = any(x in error_str for x in [
+                "429", "rate_limit", "rate limit", 
+                "500", "502", "503", "504",
+                "internal_server_error", "service unavailable",
+                "timeout", "connection", "network"
+            ])
+            
+            if is_retryable and attempt < max_retries - 1:
+                wait_time = min(delay, 60)  # Cap at 60 seconds
+                print(f"⏳ API error (attempt {attempt + 1}/{max_retries}). Waiting {wait_time}s...")
+                time.sleep(wait_time)
+                delay *= 1.5  # Gentler exponential backoff
+            elif attempt < max_retries - 1:
+                # Unknown error, still retry with shorter delay
+                time.sleep(2)
             else:
-                raise e
+                raise last_error
+    
+    raise last_error if last_error else Exception("Max retries exceeded")
 
 def split_pdf_to_chunks(pdf_content, pages_per_chunk=10):
     """Split PDF into chunks of pages and return as separate base64 PDFs"""
@@ -196,36 +206,32 @@ def split_pdf_to_chunks(pdf_content, pages_per_chunk=10):
     return chunks
 
 
-def process_single_chunk(chunk, client):
-    """Process a single chunk - OCR + extraction. Returns (chunk_idx, records, error)"""
+def process_chunk_safe(chunk, client):
+    """Process a single chunk with maximum safety - OCR + extraction"""
     chunk_idx = chunk['chunk_idx']
     chunk_start = chunk['start_page']
     chunk_end = chunk['end_page']
     
-    try:
-        # OCR this chunk
-        def ocr_call():
-            return client.ocr.process(
-                document={
-                    "type": "document_url",
-                    "document_url": f"data:application/pdf;base64,{chunk['base64']}"
-                },
-                model="mistral-ocr-latest",
-                include_image_base64=False,
-            )
-        
-        ocr_response = call_with_retry(ocr_call)
-        
-        # Combine OCR text
-        chunk_text = ""
-        for page_idx, page in enumerate(ocr_response.pages):
-            chunk_text += f"\n--- Page {chunk_start + page_idx} ---\n{page.markdown}\n"
-        
-        # Small delay before extraction to avoid hammering API
-        time.sleep(0.5)
-        
-        # Extract records
-        extraction_prompt = """You are a medical document data extraction specialist. Extract ALL patient records from this content.
+    # OCR this chunk
+    def ocr_call():
+        return client.ocr.process(
+            document={
+                "type": "document_url",
+                "document_url": f"data:application/pdf;base64,{chunk['base64']}"
+            },
+            model="mistral-ocr-latest",
+            include_image_base64=False,
+        )
+    
+    ocr_response = call_with_retry(ocr_call)
+    
+    # Combine OCR text
+    chunk_text = ""
+    for page_idx, page in enumerate(ocr_response.pages):
+        chunk_text += f"\n--- Page {chunk_start + page_idx} ---\n{page.markdown}\n"
+    
+    # Extract records
+    extraction_prompt = """You are a medical document data extraction specialist. Extract ALL patient records from this content.
 
 RECORD TYPES:
 1. "type": "dropsheet" - Handwritten dropsheet/signature page (set all other fields to "")
@@ -245,69 +251,64 @@ LEAVE BLANK: Phleb, No of Patient, Patient ID, patient bod, From, To, Miles, To_
 
 RULES: Copy values EXACTLY. Return records in order. NEVER fabricate data."""
 
-        def chat_call():
-            return client.chat.complete(
-                model="mistral-large-latest",
-                messages=[{"role": "user", "content": f"{extraction_prompt}\n\n{chunk_text}"}],
-                response_format=ResponseFormat(
-                    type="json_schema",
-                    json_schema=JSONSchema(
-                        name="response_schema",
-                        schema_definition={
-                            "type": "object",
-                            "properties": {
-                                "records": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "type": {"type": "string", "enum": ["dropsheet", "patient"]},
-                                            "Phleb": {"type": "string", "default": ""},
-                                            "Date": {"type": "string"},
-                                            "No of Patient": {"type": "string", "default": ""},
-                                            "Patient ID": {"type": "string", "default": ""},
-                                            "patient bod": {"type": "string", "default": ""},
-                                            "Name of Patient": {"type": "string"},
-                                            "Patient Birthdate": {"type": "string"},
-                                            "Facility Information": {"type": "string"},
-                                            "Patients ICD Code": {"type": "string"},
-                                            "From": {"type": "string", "default": ""},
-                                            "To": {"type": "string", "default": ""},
-                                            "Miles": {"type": "string", "default": ""},
-                                            "To_2": {"type": "string", "default": ""},
-                                            "Miles_2": {"type": "string", "default": ""},
-                                            "To_3": {"type": "string", "default": ""},
-                                            "Miles_3": {"type": "string", "default": ""},
-                                            "To_4": {"type": "string", "default": ""},
-                                            "Miles_4": {"type": "string", "default": ""},
-                                            "To_5": {"type": "string", "default": ""},
-                                            "Miles_5": {"type": "string", "default": ""},
-                                            "Total Miles": {"type": "string", "default": ""},
-                                            "Insurance Company": {"type": "string"},
-                                            "Mem ID": {"type": "string"},
-                                            "Group Mem ID": {"type": "string"}
-                                        },
-                                        "required": ["type"]
-                                    }
+    def chat_call():
+        return client.chat.complete(
+            model="mistral-large-latest",
+            messages=[{"role": "user", "content": f"{extraction_prompt}\n\n{chunk_text}"}],
+            response_format=ResponseFormat(
+                type="json_schema",
+                json_schema=JSONSchema(
+                    name="response_schema",
+                    schema_definition={
+                        "type": "object",
+                        "properties": {
+                            "records": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": {"type": "string", "enum": ["dropsheet", "patient"]},
+                                        "Phleb": {"type": "string", "default": ""},
+                                        "Date": {"type": "string"},
+                                        "No of Patient": {"type": "string", "default": ""},
+                                        "Patient ID": {"type": "string", "default": ""},
+                                        "patient bod": {"type": "string", "default": ""},
+                                        "Name of Patient": {"type": "string"},
+                                        "Patient Birthdate": {"type": "string"},
+                                        "Facility Information": {"type": "string"},
+                                        "Patients ICD Code": {"type": "string"},
+                                        "From": {"type": "string", "default": ""},
+                                        "To": {"type": "string", "default": ""},
+                                        "Miles": {"type": "string", "default": ""},
+                                        "To_2": {"type": "string", "default": ""},
+                                        "Miles_2": {"type": "string", "default": ""},
+                                        "To_3": {"type": "string", "default": ""},
+                                        "Miles_3": {"type": "string", "default": ""},
+                                        "To_4": {"type": "string", "default": ""},
+                                        "Miles_4": {"type": "string", "default": ""},
+                                        "To_5": {"type": "string", "default": ""},
+                                        "Miles_5": {"type": "string", "default": ""},
+                                        "Total Miles": {"type": "string", "default": ""},
+                                        "Insurance Company": {"type": "string"},
+                                        "Mem ID": {"type": "string"},
+                                        "Group Mem ID": {"type": "string"}
+                                    },
+                                    "required": ["type"]
                                 }
-                            },
-                            "required": ["records"]
+                            }
                         },
-                    ),
+                        "required": ["records"]
+                    },
                 ),
-            )
-        
-        chat_response = call_with_retry(chat_call)
-        extracted_data = json.loads(chat_response.choices[0].message.content)
-        records = extracted_data.get("records", [])
-        
-        return (chunk_idx, records, None)
+            ),
+        )
     
-    except Exception as e:
-        return (chunk_idx, [], str(e))
+    chat_response = call_with_retry(chat_call)
+    extracted_data = json.loads(chat_response.choices[0].message.content)
+    return extracted_data.get("records", [])
 
 def process_pdf(pdf_file, progress_callback=None):
-    """Process PDF using concurrent processing for speed"""
+    """Process PDF sequentially with robust error handling - WILL NOT STOP"""
     try:
         if progress_callback:
             progress_callback(2, "Reading PDF file...")
@@ -326,73 +327,69 @@ def process_pdf(pdf_file, progress_callback=None):
         pdf_doc.close()
         
         if progress_callback:
-            progress_callback(5, f"Splitting {num_pages} pages into chunks of 10...")
+            progress_callback(5, f"Splitting {num_pages} pages into chunks...")
         
-        # Split PDF into 10-page chunks for stability
+        # Split PDF into 10-page chunks
         chunks = split_pdf_to_chunks(pdf_content, pages_per_chunk=10)
         total_chunks = len(chunks)
         
-        if progress_callback:
-            progress_callback(8, f"Processing {total_chunks} chunks with parallel workers...")
-        
-        # Process chunks concurrently with 3 workers (balanced for API limits)
-        max_workers = min(3, total_chunks)
-        all_results = [None] * total_chunks  # Pre-allocate to maintain order
-        completed_count = 0
-        errors = []
-        
-        # Thread-safe counter
-        lock = threading.Lock()
-        
-        def update_completed():
-            nonlocal completed_count
-            with lock:
-                completed_count += 1
-                if progress_callback:
-                    pct = 10 + int((completed_count / total_chunks) * 80)
-                    progress_callback(pct, f"Completed {completed_count}/{total_chunks} chunks...")
-        
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all chunks
-            future_to_chunk = {
-                executor.submit(process_single_chunk, chunk, client): chunk 
-                for chunk in chunks
-            }
-            
-            # Process as they complete
-            for future in as_completed(future_to_chunk):
-                chunk = future_to_chunk[future]
-                try:
-                    chunk_idx, records, error = future.result()
-                    if error:
-                        errors.append(f"Chunk {chunk_idx + 1}: {error}")
-                        all_results[chunk_idx] = []
-                    else:
-                        all_results[chunk_idx] = records
-                    update_completed()
-                except Exception as e:
-                    errors.append(f"Chunk {chunk['chunk_idx'] + 1}: {str(e)}")
-                    all_results[chunk['chunk_idx']] = []
-                    update_completed()
-        
-        # Combine all records in order
         all_records = []
-        for records in all_results:
-            if records:
+        failed_chunks = []
+        
+        for chunk_idx, chunk in enumerate(chunks):
+            chunk_start = chunk['start_page']
+            chunk_end = chunk['end_page']
+            
+            # Update progress
+            progress_pct = 5 + int(((chunk_idx) / total_chunks) * 85)
+            if progress_callback:
+                progress_callback(progress_pct, f"Processing pages {chunk_start}-{chunk_end} of {num_pages}...")
+            
+            # Process this chunk with full error protection
+            try:
+                records = process_chunk_safe(chunk, client)
                 all_records.extend(records)
+                
+                if progress_callback:
+                    progress_callback(
+                        5 + int(((chunk_idx + 1) / total_chunks) * 85),
+                        f"✓ Done {chunk_start}-{chunk_end} ({len(records)} records) | Total: {len(all_records)}"
+                    )
+            
+            except Exception as chunk_error:
+                # Log error but CONTINUE processing
+                failed_chunks.append({
+                    'pages': f"{chunk_start}-{chunk_end}",
+                    'error': str(chunk_error)[:100]
+                })
+                if progress_callback:
+                    progress_callback(
+                        5 + int(((chunk_idx + 1) / total_chunks) * 85),
+                        f"⚠️ Chunk {chunk_start}-{chunk_end} failed, continuing..."
+                    )
+                # Wait a bit before next chunk after error
+                time.sleep(3)
+                continue
+            
+            # Small delay between chunks to be gentle on API
+            if chunk_idx < total_chunks - 1:
+                time.sleep(0.5)
         
         if progress_callback:
             progress_callback(92, f"Finalizing... Total: {len(all_records)} records")
         
-        if errors:
-            st.warning(f"⚠️ Some chunks had errors: {len(errors)} failed. Processed {len(all_records)} records from successful chunks.")
-            for err in errors[:3]:  # Show first 3 errors
-                st.caption(f"  • {err}")
+        # Report any failures
+        if failed_chunks:
+            st.warning(f"⚠️ {len(failed_chunks)} chunks failed but we got {len(all_records)} records from the rest!")
+            for fc in failed_chunks[:5]:
+                st.caption(f"  • Pages {fc['pages']}: {fc['error']}")
         
         return all_records
     
     except Exception as e:
         st.error(f"Error processing PDF: {str(e)}")
+        import traceback
+        st.code(traceback.format_exc())
         return None
 
 def save_to_excel(data, filename):
