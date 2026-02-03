@@ -142,38 +142,144 @@ def match_facility(extracted_facility):
     # No match found - return empty string
     return ""
 
+def call_with_retry(api_func, max_retries=5, initial_delay=5):
+    """Call API function with exponential backoff retry on rate limit errors"""
+    delay = initial_delay
+    for attempt in range(max_retries):
+        try:
+            return api_func()
+        except Exception as e:
+            error_str = str(e)
+            # Check if it's a rate limit error (429)
+            if "429" in error_str or "rate_limit" in error_str.lower() or "rate limit" in error_str.lower():
+                if attempt < max_retries - 1:
+                    st.warning(f"⏳ Rate limit hit. Waiting {delay} seconds before retry ({attempt + 1}/{max_retries})...")
+                    time.sleep(delay)
+                    delay *= 2  # Exponential backoff
+                else:
+                    raise Exception(f"Rate limit exceeded after {max_retries} retries. Please try again later or use a smaller PDF.")
+            else:
+                raise e
+
+def split_pdf_to_images(pdf_content):
+    """Convert PDF pages to individual images for batch processing"""
+    import fitz  # PyMuPDF
+    from io import BytesIO
+    
+    pdf_document = fitz.open(stream=pdf_content, filetype="pdf")
+    page_images = []
+    
+    for page_num in range(len(pdf_document)):
+        page = pdf_document.load_page(page_num)
+        # Render page to image (150 DPI for good quality without being too large)
+        mat = fitz.Matrix(150/72, 150/72)
+        pix = page.get_pixmap(matrix=mat)
+        img_bytes = pix.tobytes("png")
+        page_images.append(base64.b64encode(img_bytes).decode('utf-8'))
+    
+    pdf_document.close()
+    return page_images
+
 def process_pdf(pdf_file, progress_callback=None):
-    """Process PDF using Mistral OCR API"""
+    """Process PDF using Mistral OCR API with batch processing for large files"""
     try:
         # Update progress
         if progress_callback:
-            progress_callback(5, "Encoding PDF file...")
+            progress_callback(5, "Reading PDF file...")
         
-        # Encode the file
-        base64_file = encode_file(pdf_file.read())
+        # Read the file content
+        pdf_content = pdf_file.read()
+        pdf_size_mb = len(pdf_content) / (1024 * 1024)
         
-        # Update progress
+        # Check if PDF is large (> 5MB or many pages)
+        # For large PDFs, use page-by-page processing
+        try:
+            import fitz
+            pdf_doc = fitz.open(stream=pdf_content, filetype="pdf")
+            num_pages = len(pdf_doc)
+            pdf_doc.close()
+        except ImportError:
+            # If PyMuPDF not available, estimate pages from size
+            num_pages = max(1, int(pdf_size_mb * 10))  # Rough estimate
+        
         if progress_callback:
-            progress_callback(10, "Running OCR on document...")
+            progress_callback(10, f"Detected {num_pages} pages...")
         
-        # Step 1: Call Mistral OCR API to extract text
-        ocr_response = client.ocr.process(
-            document={
-                "type": "document_url",
-                "document_url": f"data:application/pdf;base64,{base64_file}"
-            },
-            model="mistral-ocr-latest",
-            include_image_base64=True,
-        )
-        
-        # Update progress
-        if progress_callback:
-            progress_callback(40, "Extracting text from pages...")
-        
-        # Combine all pages' markdown content
         all_text = ""
-        for page in ocr_response.pages:
-            all_text += page.markdown + "\n"
+        
+        # For large PDFs (>30 pages), process in batches
+        if num_pages > 30:
+            try:
+                import fitz
+                page_images = split_pdf_to_images(pdf_content)
+                
+                # Process in batches of 10 pages
+                batch_size = 10
+                total_batches = (len(page_images) + batch_size - 1) // batch_size
+                
+                for batch_idx in range(total_batches):
+                    start_idx = batch_idx * batch_size
+                    end_idx = min(start_idx + batch_size, len(page_images))
+                    batch_images = page_images[start_idx:end_idx]
+                    
+                    progress_pct = 10 + int((batch_idx / total_batches) * 35)
+                    if progress_callback:
+                        progress_callback(progress_pct, f"Processing pages {start_idx + 1}-{end_idx} of {num_pages}...")
+                    
+                    # Process each page in the batch
+                    for i, img_base64 in enumerate(batch_images):
+                        page_num = start_idx + i + 1
+                        
+                        def ocr_call():
+                            return client.ocr.process(
+                                document={
+                                    "type": "image_url",
+                                    "image_url": f"data:image/png;base64,{img_base64}"
+                                },
+                                model="mistral-ocr-latest",
+                                include_image_base64=False,
+                            )
+                        
+                        ocr_response = call_with_retry(ocr_call)
+                        
+                        for page in ocr_response.pages:
+                            all_text += f"\n--- Page {page_num} ---\n"
+                            all_text += page.markdown + "\n"
+                        
+                        # Small delay between pages to avoid rate limits
+                        time.sleep(0.5)
+                    
+                    # Longer delay between batches
+                    if batch_idx < total_batches - 1:
+                        time.sleep(2)
+                
+            except ImportError:
+                st.error("For large PDFs (>30 pages), please install PyMuPDF: pip install pymupdf")
+                return None
+        else:
+            # For smaller PDFs, use the original single-request method with retry
+            if progress_callback:
+                progress_callback(15, "Running OCR on document...")
+            
+            base64_file = base64.b64encode(pdf_content).decode('utf-8')
+            
+            def ocr_call():
+                return client.ocr.process(
+                    document={
+                        "type": "document_url",
+                        "document_url": f"data:application/pdf;base64,{base64_file}"
+                    },
+                    model="mistral-ocr-latest",
+                    include_image_base64=False,
+                )
+            
+            ocr_response = call_with_retry(ocr_call)
+            
+            if progress_callback:
+                progress_callback(40, "Extracting text from pages...")
+            
+            for page in ocr_response.pages:
+                all_text += page.markdown + "\n"
         
         # Update progress
         if progress_callback:
@@ -223,61 +329,64 @@ EXTRACTION RULES:
 
 Return a JSON array like: [{"type": "dropsheet", ...}, {"type": "patient", ...}, {"type": "patient", ...}, {"type": "dropsheet", ...}, ...]"""
         
-        chat_response = client.chat.complete(
-            model="mistral-large-latest",
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"{extraction_prompt}\n\n--- DOCUMENT CONTENT ---\n{all_text}\n--- END OF DOCUMENT ---"
-                }
-            ],
-            response_format=ResponseFormat(
-                type="json_schema",
-                json_schema=JSONSchema(
-                    name="response_schema",
-                    schema_definition={
-                        "type": "object",
-                        "properties": {
-                            "records": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "type": {"type": "string", "enum": ["dropsheet", "patient"]},
-                                        "Phleb": {"type": "string", "default": ""},
-                                        "Date": {"type": "string"},
-                                        "No of Patient": {"type": "string", "default": ""},
-                                        "Patient ID": {"type": "string", "default": ""},
-                                        "patient bod": {"type": "string", "default": ""},
-                                        "Name of Patient": {"type": "string"},
-                                        "Patient Birthdate": {"type": "string"},
-                                        "Facility Information": {"type": "string"},
-                                        "Patients ICD Code": {"type": "string"},
-                                        "From": {"type": "string", "default": ""},
-                                        "To": {"type": "string", "default": ""},
-                                        "Miles": {"type": "string", "default": ""},
-                                        "To_2": {"type": "string", "default": ""},
-                                        "Miles_2": {"type": "string", "default": ""},
-                                        "To_3": {"type": "string", "default": ""},
-                                        "Miles_3": {"type": "string", "default": ""},
-                                        "To_4": {"type": "string", "default": ""},
-                                        "Miles_4": {"type": "string", "default": ""},
-                                        "To_5": {"type": "string", "default": ""},
-                                        "Miles_5": {"type": "string", "default": ""},
-                                        "Total Miles": {"type": "string", "default": ""},
-                                        "Insurance Company": {"type": "string"},
-                                        "Mem ID": {"type": "string"},
-                                        "Group Mem ID": {"type": "string"}
-                                    },
-                                    "required": ["type"]
+        def chat_call():
+            return client.chat.complete(
+                model="mistral-large-latest",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": f"{extraction_prompt}\n\n--- DOCUMENT CONTENT ---\n{all_text}\n--- END OF DOCUMENT ---"
+                    }
+                ],
+                response_format=ResponseFormat(
+                    type="json_schema",
+                    json_schema=JSONSchema(
+                        name="response_schema",
+                        schema_definition={
+                            "type": "object",
+                            "properties": {
+                                "records": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "type": {"type": "string", "enum": ["dropsheet", "patient"]},
+                                            "Phleb": {"type": "string", "default": ""},
+                                            "Date": {"type": "string"},
+                                            "No of Patient": {"type": "string", "default": ""},
+                                            "Patient ID": {"type": "string", "default": ""},
+                                            "patient bod": {"type": "string", "default": ""},
+                                            "Name of Patient": {"type": "string"},
+                                            "Patient Birthdate": {"type": "string"},
+                                            "Facility Information": {"type": "string"},
+                                            "Patients ICD Code": {"type": "string"},
+                                            "From": {"type": "string", "default": ""},
+                                            "To": {"type": "string", "default": ""},
+                                            "Miles": {"type": "string", "default": ""},
+                                            "To_2": {"type": "string", "default": ""},
+                                            "Miles_2": {"type": "string", "default": ""},
+                                            "To_3": {"type": "string", "default": ""},
+                                            "Miles_3": {"type": "string", "default": ""},
+                                            "To_4": {"type": "string", "default": ""},
+                                            "Miles_4": {"type": "string", "default": ""},
+                                            "To_5": {"type": "string", "default": ""},
+                                            "Miles_5": {"type": "string", "default": ""},
+                                            "Total Miles": {"type": "string", "default": ""},
+                                            "Insurance Company": {"type": "string"},
+                                            "Mem ID": {"type": "string"},
+                                            "Group Mem ID": {"type": "string"}
+                                        },
+                                        "required": ["type"]
+                                    }
                                 }
-                            }
+                            },
+                            "required": ["records"]
                         },
-                        "required": ["records"]
-                    },
+                    ),
                 ),
-            ),
-        )
+            )
+        
+        chat_response = call_with_retry(chat_call)
         
         # Update progress
         if progress_callback:
