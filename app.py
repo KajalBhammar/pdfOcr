@@ -63,6 +63,28 @@ def encode_file(file_content):
     """Encode file content to base64"""
     return base64.b64encode(file_content).decode('utf-8')
 
+def extract_icd_codes_only(icd_string):
+    """Extract only ICD codes from string, removing descriptions"""
+    if not icd_string or icd_string.strip() == "":
+        return ""
+    
+    import re
+    # Pattern to match ICD codes (letter followed by numbers, optional dot and more characters)
+    # Examples: I50.9, E11.9, T81.49XD, Z23, D64.9, L03.113
+    icd_pattern = r'[A-Z]\d{2,3}(?:\.\d{1,4})?(?:[A-Z]{1,2})?'
+    
+    codes = re.findall(icd_pattern, icd_string.upper())
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_codes = []
+    for code in codes:
+        if code not in seen:
+            seen.add(code)
+            unique_codes.append(code)
+    
+    return ", ".join(unique_codes)
+
 def match_facility(extracted_facility):
     """Match extracted facility name with master list and return matched facility"""
     if not extracted_facility or extracted_facility.strip() == "":
@@ -305,6 +327,10 @@ def save_to_excel(data, filename):
                         matched_facility = match_facility(current_facility_raw)
                         row_data["Facility Information"] = matched_facility
                         
+                        # Extract only ICD codes without descriptions
+                        icd_raw = row_data.get("Patients ICD Code", "")
+                        row_data["Patients ICD Code"] = extract_icd_codes_only(icd_raw)
+                        
                         # Normalize date for comparison (lowercase, remove extra spaces)
                         current_date_normalized = " ".join(current_date.lower().split())
                         
@@ -372,25 +398,20 @@ def save_to_excel(data, filename):
             mem_id_value = ws.cell(row=row, column=mem_id_col).value if mem_id_col else None
             group_mem_id_value = ws.cell(row=row, column=group_mem_id_col).value if group_mem_id_col else None
             
-            # Check if Insurance Company is present (not empty)
+            # Check if each field is present (not empty)
             insurance_present = insurance_value and str(insurance_value).strip() != ""
             mem_id_present = mem_id_value and str(mem_id_value).strip() != ""
             group_mem_id_present = group_mem_id_value and str(group_mem_id_value).strip() != ""
             
-            # If ALL 3 fields are missing, highlight all 3 in red
-            if not insurance_present and not mem_id_present and not group_mem_id_present:
+            # Highlight each missing field in red individually
+            if not insurance_present:
                 ws.cell(row=row, column=insurance_col).fill = red_fill
+            
+            if not mem_id_present:
                 ws.cell(row=row, column=mem_id_col).fill = red_fill
+            
+            if not group_mem_id_present:
                 ws.cell(row=row, column=group_mem_id_col).fill = red_fill
-            elif insurance_present:
-                # If Insurance Company is present, check the other two fields
-                if not mem_id_present:
-                    # Highlight Mem ID cell in red
-                    ws.cell(row=row, column=mem_id_col).fill = red_fill
-                
-                if not group_mem_id_present:
-                    # Highlight Group Mem ID cell in red
-                    ws.cell(row=row, column=group_mem_id_col).fill = red_fill
         
         # Save the workbook with highlighting
         wb.save(filepath)
