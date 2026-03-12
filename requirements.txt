@@ -1,5 +1,6 @@
 streamlit
-mistralai = 1.10.0
+mistralai==1.10.0
 PyMuPDF
 openpyxl
+
 
